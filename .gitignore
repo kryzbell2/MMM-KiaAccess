@@ -14,3 +14,18 @@ python-standalone/
 token.json
 token-*.json
 cache/
+
+# Private deployment files and backups (examples remain tracked).
+.env
+.env.*
+!.env.example
+config.js.*
+secrets.json.*
+token.json.*
+token-*.json.*
+history/
+runtime/
+backups/
+*.sqlite
+*.sqlite3
+*.db
