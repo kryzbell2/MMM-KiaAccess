@@ -1,5 +1,12 @@
 # Kia Access — one shared engine for Home Assistant **and** MagicMirror²
 
+## Bluebell EV6 installation
+
+For this fork's Bluebell dashboard, use the [install/reinstall guide](docs/BLUEBELL.md)
+and [complete credential-free configuration example](examples/bluebell.config.example.js).
+Enter credentials only on your Pi and enroll each installation independently.
+This fork preserves the upstream project below; Pi updates are performed manually.
+
 [![CI](https://github.com/Legal-Copy7045/MMM-KiaAccess/actions/workflows/ci.yml/badge.svg)](https://github.com/Legal-Copy7045/MMM-KiaAccess/actions/workflows/ci.yml)
 
 ## TL;DR
