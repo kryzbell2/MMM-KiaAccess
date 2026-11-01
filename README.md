@@ -34,7 +34,10 @@ connected code are required, with a vehicle report no older than 20 minutes. Bef
 every targeted wake, Python rereads the cloud cache and checks the same conditions.
 No locks, climate, startup or charging-control commands are sent by adaptive polling.
 
-Live attempts share an account-wide hourly budget and overlap guard. After any
+Charging evidence, sampling cadence and the episode latch are isolated per vehicle;
+one vehicle's stopped report cannot rearm another. Once vehicle identity is known,
+automatic and explicit selections of the same car share its latch. Live attempts share
+an account-wide hourly budget, error backoff and overlap guard. After any
 process restart there is a full one-hour live-request cooldown, and no disk cache
 can authorize the first wake: a successful cloud read is required. This conservative
 reset protects the hourly budget without persisting wake authorization. Stale data
@@ -42,7 +45,10 @@ never authorizes a wake. A live response with an unchanged/missing timestamp, an
 API error, or the continuous-active limit latches the session into passive reads.
 New charging reports alone cannot clear that latch; a newer fresh stopped/unplugged
 report must be observed first. A skipped or failed attempt still consumes its reserved
-budget. API errors use passive backoff of at least an hour. Existing authentication
+budget. With the default stale interval, repeated API failures back off for 1, 2, 4,
+then at most 8 hours; a successful read resets that vehicle's failure streak. A
+regressing or contradictory report cannot lower the timestamp baseline or rearm the
+latch. Existing authentication
 cooldowns remain in effect. These controls are local to this process: separate
 mirrors/services cannot coordinate budgets. Keep only one mirror active as usual.
 
@@ -63,6 +69,8 @@ success alone is not proof of a new vehicle report. `batteryPlugin` is passed
 through as a raw connector code, with no authoritative enum in that parser. Codes
 1–4 are treated as connected for cadence only; no connector type is inferred
 from the observed EV6 code 2. Boolean/numeric charging true/1 is required separately.
+A passive adaptive cycle reads cached status once; only a permitted live cycle needs
+the additional post-refresh cached read.
 Timezone-free, missing, future or old timestamps fail closed. `syncDate.utc` is the
 library's source for the vehicle report timestamp.
 

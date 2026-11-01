@@ -794,10 +794,13 @@ def fetch(job, token_file=None):
             fresh = age is not None and 0 <= age <= min(float(adaptive.get("statusMaxAge", 1200000)), 1200000) / 1000
             adaptive_before = stamp
             adaptive_live = fresh and connected and (charging is True or type(charging) is int and charging == 1)
-            job = dict(job, refresh=adaptive_live, wakeVin=job.get("vin") or candidate.id)
+            job = dict(job, refresh=adaptive_live, wakeVin=job.get("vin") or _vehicle_key(candidate))
     meta_note = None
     _raw_to = job.get("forceRefreshTimeout", 45)
     timeout = float(_raw_to) if _raw_to is not None else 45.0
+    if adaptive and timeout <= 0:
+        adaptive_live = False
+        job = dict(job, refresh=False)
     # refresh:false (MM) or a zero/negative wake-up timeout (HA "Live wake-up
     # timeout = 0") both mean: don't wake the car, just read Kia's server cache.
     if job.get("refresh", True) and timeout > 0:
@@ -841,7 +844,8 @@ def fetch(job, token_file=None):
             if adaptive:
                 raise ClientError("adaptive live refresh failed") from err["e"]
             meta_note = f"live wake-up failed: {err['e']}"
-    _refresh_cached_state(vm, job)
+    if not adaptive or adaptive_live:
+        _refresh_cached_state(vm, job)
 
     selected = _select_vehicles(vm, job.get("vin", ""))
     if adaptive_live:
