@@ -10,7 +10,18 @@
     pin: "",
     brand: "KIA",
     region: "USA",
-    // Requests cloud-cached data; does not request a forced vehicle refresh.
+    adaptivePolling: {
+      enabled: true,
+      chargingInterval: 600000,
+      pluggedInterval: 1800000,
+      idleInterval: 3600000,
+      staleInterval: 3600000,
+      statusMaxAge: 1200000,
+      liveRefreshTimeout: 30,
+      maxLiveRequestsPerHour: 6,
+      maxContinuousActiveMinutes: 90
+    },
+    // Legacy settings apply if adaptive polling is disabled.
     refresh: false,
     forceRefreshTimeout: 0,
     updateInterval: 1800000,

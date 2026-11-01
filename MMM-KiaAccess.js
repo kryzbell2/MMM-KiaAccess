@@ -48,6 +48,9 @@ Module.register("MMM-KiaAccess", {
                              // before falling back to Kia's cached copy for this poll
 
     // ---- polling / reliability ----
+    adaptivePolling: { enabled: true, chargingInterval: 600000, pluggedInterval: 1800000,
+      idleInterval: 3600000, staleInterval: 3600000, statusMaxAge: 1200000,
+      liveRefreshTimeout: 30, maxLiveRequestsPerHour: 6, maxContinuousActiveMinutes: 90 },
     updateInterval: 30 * 60 * 1000, // 30 min. Be gentle: frequent polls drain the 12V battery.
     retryInterval: 5 * 60 * 1000, // base delay between retries after a failure
     backoffMax: 8, // cap the exponential backoff at retryInterval * this
@@ -720,6 +723,7 @@ Module.register("MMM-KiaAccess", {
       source: c.source,
       homeassistant: c.homeassistant,
       refresh: c.refresh,
+      adaptivePolling: c.adaptivePolling,
       // node_helper needs this for core/analytics.js's mi vs. km formatting
       // (everything else it displays server-side-free is already unit-agnostic)
       units: c.units,

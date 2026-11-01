@@ -23,6 +23,7 @@ const PY = process.env.PYTHON || (process.platform === "win32" ? "python" : "pyt
 
 // mirrors ci.yml's "python" job step order
 const CORE_TESTS = [
+  "test/adaptive_polling_test.py",
   "test/spec_check.py",
   "test/contract_test.py",
   "test/dump_vehicle_test.py",
