@@ -29,6 +29,8 @@ maintained (it powers the Home Assistant Kia/Hyundai integration).
 import json
 import sys
 
+import os
+import cloud_budget
 import kia_client
 
 
@@ -43,12 +45,24 @@ def main():
         if job.get("command"):
             result = kia_client.run_command(job)
         else:
-            result = kia_client.fetch(job)
+            protection = job.get("requestProtection")
+            if protection:
+                ledger = os.path.join(kia_client._HERE, "cache", "request-budget-" + kia_client._job_account_hash(job) + ".json")
+                budget = cloud_budget.Budget(ledger, protection.get("maxCloudRequestsPerHour", 60))
+                # Reserve each actual per-vehicle wake, including legacy all-
+                # vehicle jobs, before handing it to the library.
+                job["_wakeBudget"] = budget
+                with cloud_budget.protect_http(budget):
+                    result = kia_client.fetch(job)
+            else:
+                result = kia_client.fetch(job)
             # the raw token is only for in-process HA callers — never expose it
             # to the Node side (it would reach the frontend / MQTT)
             if isinstance(result.get("meta"), dict):
                 result["meta"].pop("token", None)
         print(json.dumps(result))
+    except cloud_budget.BudgetExceeded:
+        print(json.dumps({"ok": False, "error": "cloud request limit or guard unavailable; passive backoff"}))
     except kia_client.OtpRequired as exc:
         print(json.dumps({"ok": False, "error": str(exc)}))
     except kia_client.ClientError as exc:

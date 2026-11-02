@@ -11,7 +11,7 @@
     brand: "KIA",
     region: "USA",
     adaptivePolling: {
-      enabled: true,
+      enabled: false,
       chargingInterval: 600000,
       pluggedInterval: 1800000,
       idleInterval: 3600000,
@@ -25,6 +25,8 @@
     refresh: false,
     forceRefreshTimeout: 0,
     updateInterval: 1800000,
+    maxRequestsPerHour: 12,
+    maxCloudRequestsPerHour: 60,
     units: "imperial",
     maxWidth: "320px",
     showTable: false,

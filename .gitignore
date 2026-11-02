@@ -29,3 +29,11 @@ backups/
 *.sqlite
 *.sqlite3
 *.db
+
+# Authentication cooldowns, HTTP budgets and server-only credentials
+authstate-*.json
+authstate-*.json.*
+request-budget-*.json*
+server-secrets*.json
+*.pem
+*.key

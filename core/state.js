@@ -182,6 +182,11 @@
       tyreRR: bool("tire_pressure_rear_right_warning_is_on"),
       // extra fields used by conditions.js (not drawn)
       car12vPct: num("car_battery_percentage"),
+      battery12vFresh: (function () {
+        var raw=f["vehicle.last_updated_at"];
+        var t=typeof raw === "string" && /(?:Z|[+-]\d\d:\d\d)$/.test(raw) ? Date.parse(raw) : NaN;
+        return isFinite(t) && Date.now()>=t && Date.now()-t<=1200000 && f["_meta.stale"]!==true;
+      })(),
       chargeLimitPct: chargeLimitPct,
       capacityKwh: num("ev_battery_capacity"),
       serviceKm: num("next_service_distance"), // distance to the next service

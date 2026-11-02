@@ -1,6 +1,6 @@
 const assert = require("assert");
 const { Poller, options, mode } = require("../adaptive_polling");
-const c = options(), boot = Date.now(), now = boot + 3600001;
+const c = options({enabled:true}), boot = Date.now(), now = boot + 3600001;
 const vehicle = (charging, plug, t = now) => ({ ev_battery_is_charging: charging,
   ev_battery_is_plugged_in: plug, last_updated_at: new Date(t).toISOString() });
 const p = new Poller(boot);
@@ -47,6 +47,10 @@ try {
   children[0].emit("error", new Error("mock timeout"));
   assert(h.adaptive[h.identifierFor(config)].blocked);
   const legacy = { ...config, username: "legacy", refresh: true, adaptivePolling: { enabled: false }, forceRefreshTimeout: 45 };
+  const legacyAccount=require('../adaptive_polling').accountBudget();
+  h.adaptiveAccounts[h.acctKeyFor(legacy)]=legacyAccount;
+  const legacyLease=require('../polling_guard').acquire(h.cacheDir,h.acctKeyFor(legacy),legacyAccount,legacy);
+  legacyAccount.bootUntil=0; legacyAccount.nextAt=0; legacyAccount.reqTimes=[]; legacyLease.save(); legacyLease.release();
   h.handleFetch(legacy); assert.equal(jobs[1].refresh, true); assert.equal(jobs[1].forceRefreshTimeout, 45);
   children[1].emit("error", new Error("mock auth"));
 
@@ -62,7 +66,8 @@ try {
       child.stdout.emit("data", JSON.stringify({ ok: true, vehicles: [v], meta: { adaptiveLive: live, ...meta } }));
       child.emit("close", 0);
     };
-    policy.account.bootUntil = clock - 1;
+    const lease=require("../polling_guard").acquire(h.cacheDir,h.acctKeyFor(cfg),policy.account,cfg,clock);
+    policy.account.bootUntil=clock-1; policy.account.nextAt=0; policy.account.reqTimes=[]; lease.save(); lease.release();
     h.handleFetch(cfg);
     assert.equal(jobs[jobs.length - 1].refresh, false);
     finish(vehicle(true, 2, clock));

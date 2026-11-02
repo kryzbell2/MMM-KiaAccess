@@ -109,6 +109,14 @@ class AdaptiveBridgeTests(unittest.TestCase):
         with self.assertRaises(client.ClientError): self.fetch()
         self.vm.force_refresh_vehicle_state.assert_not_called()
 
+    def test_guard_counts_each_legacy_vehicle_wake(self):
+        budget = Mock()
+        self.vm.vehicles = {"one":self.vehicle, "two":SimpleNamespace(id="two")}
+        self.fetch(adaptivePolling=None, _wakeBudget=budget)
+        self.assertEqual(budget.reserve.call_count,2)
+        self.assertEqual(self.vm.force_refresh_vehicle_state.call_count,2)
+        self.vm.force_refresh_all_vehicles_states.assert_not_called()
+
     def test_disabled_adaptive_retains_legacy_force_all(self):
         self.vm.force_refresh_all_vehicles_states.side_effect = None
         self.fetch(adaptivePolling=None)

@@ -136,6 +136,17 @@ def build_state(flat, opts=None):
             return None
         return ms / 864e5 if ms >= 0 else None
 
+    def fresh_12v():
+        import datetime
+        raw = f.get("vehicle.last_updated_at")
+        if not isinstance(raw,str):
+            return False
+        try:
+            stamp = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return stamp.tzinfo is not None and 0 <= time.time()-stamp.timestamp() <= 1200 and f.get("_meta.stale") is not True
+        except (ValueError,TypeError):
+            return False
+
     # genuine fault lamps the car reports (only those that exist AND are on)
     _FAULTS = [
         ("brake_oil_warning_is_on", "Brake fluid low"),
@@ -199,6 +210,7 @@ def build_state(flat, opts=None):
         "tyreRL": _bool(f, "tire_pressure_rear_left_warning_is_on"),
         "tyreRR": _bool(f, "tire_pressure_rear_right_warning_is_on"),
         "car12vPct": _num(f, "car_battery_percentage"),
+        "battery12vFresh": fresh_12v(),
         "chargeLimitPct": charge_limit(),
         "capacityKwh": _num(f, "ev_battery_capacity"),
         "serviceKm": _num(f, "next_service_distance"),

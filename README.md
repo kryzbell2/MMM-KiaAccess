@@ -9,98 +9,105 @@ This fork preserves the upstream project below; Pi updates are performed manuall
 
 [![CI](https://github.com/Legal-Copy7045/MMM-KiaAccess/actions/workflows/ci.yml/badge.svg)](https://github.com/Legal-Copy7045/MMM-KiaAccess/actions/workflows/ci.yml)
 
-## Adaptive polling (MagicMirror, Kia source)
+## Safe Kia polling (MagicMirror)
 
-Adaptive polling is enabled by default. The module starts with cached cloud reads,
-then uses the vehicle's timezone-qualified `last_updated_at` (not fetch time) to
-choose 10 minutes while charging, 30 minutes connected but stopped, and 60 minutes
-unplugged, unknown or stale. Set `adaptivePolling: { enabled: false }` to retain
-legacy `refresh`, `forceRefreshTimeout`, `updateInterval` and retry behavior.
-Adaptive mode owns the live-refresh decision independently of legacy `refresh`.
-Home Assistant source scheduling is unchanged. Rotate/multiple-vehicle reads are
-cache-only in adaptive mode; use one module block for this EV6.
+**Adaptive polling is disabled by default and requires the literal `enabled: true`.**
+Omitted settings, `{}`, `false`, `null`, and strings such as `"true"` never opt in.
+Legacy `refresh` now also defaults to **false**. Existing explicit `refresh: false`
+configurations remain cached-only on upgrade. Existing users who relied on an
+omitted `refresh` for live wake-ups will receive cached data instead; explicitly
+setting `refresh: true` restores legacy live intent, subject to the protective
+limits below. Explicit adaptive opt-in owns its live decision independently of
+legacy refresh/timeout; do not opt in if you want guaranteed cache-only intent.
+The complete example below deliberately leaves adaptive polling off.
 
-The complete configuration below contains all defaults (intervals/statusMaxAge in
-milliseconds, liveRefreshTimeout in seconds, continuous limit in minutes). Partial
-adaptive settings inherit defaults. Invalid positive-number settings fall back to
-defaults; status age and live limits cannot exceed the documented safety defaults.
-Zero does not disable a safeguard. The maximum limits are 6 attempts per rolling
-hour and 90 minutes per active episode.
+Cached reads call the library's server-cache API; live refresh requests ask Kia to
+wake a vehicle. The pinned Kia USA implementation subsequently reads cache even
+after a live request, so a successful request alone does not prove a new vehicle
+report. “Cached-only” means no explicit forced vehicle refresh: Kia's own internal
+server behavior cannot be guaranteed or tested with mocks.
 
-### Vehicle and 12V safeguards
+### Limits and restart behavior
 
-A connected cable is not charging evidence. Both explicit charging and a recognized
-connected code are required, with a vehicle report no older than 20 minutes. Before
-every targeted wake, Python rereads the cloud cache and checks the same conditions.
-No locks, climate, startup or charging-control commands are sent by adaptive polling.
+All Kia modes share one normalized account key, overlap guard, and persisted
+budget under ignored owner-only `cache/`. Defaults: **12 polling cycles/hour**
+(`maxRequestsPerHour`, integer 1..24), **60 actual HTTP sends/hour**
+(`maxCloudRequestsPerHour`, integer 1..120), and a **5-minute minimum interval**.
+Missing, zero, negative, non-numeric and non-finite values use protective defaults;
+zero no longer means unlimited. Multiple module instances share these budgets.
+The Python bridge separately reserves every actual per-vehicle wake (including
+legacy all-vehicle jobs) against a rolling limit of six wakes/hour. Failed attempts
+consume their reservations. HTTP sends, redirects, authentication calls and library
+retries through requests.Session are counted before transport in the dedicated
+bridge, not by globally patching the Home Assistant process. Enrollment and other
+external tools/services are not governed by these module budgets.
 
-Charging evidence, sampling cadence and the episode latch are isolated per vehicle;
-one vehicle's stopped report cannot rearm another. Once vehicle identity is known,
-automatic and explicit selections of the same car share its latch. Live attempts share
-an account-wide hourly budget, error backoff and overlap guard. After any
-process restart there is a full one-hour live-request cooldown, and no disk cache
-can authorize the first wake: a successful cloud read is required. This conservative
-reset protects the hourly budget without persisting wake authorization. Stale data
-never authorizes a wake. A live response with an unchanged/missing timestamp, an
-API error, or the continuous-active limit latches the session into passive reads.
-New charging reports alone cannot clear that latch; a newer fresh stopped/unplugged
-report must be observed first. A skipped or failed attempt still consumes its reserved
-budget. With the default stale interval, repeated API failures back off for 1, 2, 4,
-then at most 8 hours; a successful read resets that vehicle's failure streak. A
-regressing or contradictory report cannot lower the timestamp baseline or rearm the
-latch. Existing authentication
-cooldowns remain in effect. These controls are local to this process: separate
-mirrors/services cannot coordinate budgets. Keep only one mirror active as usual.
+The first run without a valid persisted guard has a conservative **one-hour live
+cooldown**, allowing for unrecorded requests from older versions. Passive cloud
+checks can continue. A normal restart reloads that original deadline, request
+history, backoff and active-episode latch rather than starting a new hour or
+resetting the wake quota. No disk telemetry authorizes startup: a new cloud read
+is required. During the initial cooldown adaptive mode checks cloud status at most
+every ten minutes, so a recently published charging report can be discovered.
+After cooldown, independently fresh charging evidence can authorize a wake; stale
+cached charging can never bootstrap one. If Kia never publishes fresh evidence,
+remaining passive is unavoidable and intentional. No larger freshness window is used.
 
-Charging can end between the preflight check and a wake. That race cannot be
-eliminated through Kia's cloud API; a stopped result disables further wakes. A
-continuously advancing but incorrect cloud charging flag remains bounded by the
-90-minute session latch. Repeated cached reports cannot extend authorization.
+Guards reserve before starting work, fail closed if storage is unwritable/corrupt,
+and lock out overlapping processes. If a process is killed during a request, its
+`.lock` may remain. Stop all module processes, establish no bridge is still running,
+and preserve/inspect the private logs before removing an orphan lock. Never delete
+budget JSON merely to restore activity: it contains safety limits. Corrupt HTTP
+ledgers require operator inspection and conservative recovery after an hour with
+no requests. No new database or automatic token migration is introduced.
 
-### What the Kia library actually does
+### Adaptive state and history
 
-Inspected pinned `hyundai_kia_connect_api` **v4.41.4**, particularly
-[`VehicleManager.py`](https://github.com/Hyundai-Kia-Connect/hyundai_kia_connect_api/blob/v4.41.4/hyundai_kia_connect_api/VehicleManager.py)
-and [`KiaUvoApiUSA.py`](https://github.com/Hyundai-Kia-Connect/hyundai_kia_connect_api/blob/v4.41.4/hyundai_kia_connect_api/KiaUvoApiUSA.py).
-`update_all_vehicles_with_cached_state` reads server-cached status; adaptive mode
-never calls `check_and_force_update_vehicles`, which may force a wake by age.
-`force_refresh_vehicle_state` requests live status but Kia USA then rereads cache;
-success alone is not proof of a new vehicle report. `batteryPlugin` is passed
-through as a raw connector code, with no authoritative enum in that parser. Codes
-1–4 are treated as connected for cadence only; no connector type is inferred
-from the observed EV6 code 2. Boolean/numeric charging true/1 is required separately.
-A passive adaptive cycle reads cached status once; only a permitted live cycle needs
-the additional post-refresh cached read.
-Timezone-free, missing, future or old timestamps fail closed. `syncDate.utc` is the
-library's source for the vehicle report timestamp.
+Explicit opt-in uses minimum cadences of 10 minutes charging, 30 minutes plugged
+but stopped, and 60 minutes unplugged/unknown/stale. Intervals/statusMaxAge are
+milliseconds, liveRefreshTimeout is seconds, and the continuous limit is minutes.
+Freshness is at most 20 minutes, hourly wakes at most six, live timeout at most
+30 seconds, and a continuous episode at most 90 minutes. Full property defaults
+are in the complete example. Partial adaptive settings inherit those defaults.
 
-The library's cached path uses Kia cloud endpoints and may also fetch charge targets.
-This means “passive” here promises no explicit forced refresh, not a proven guarantee
-that Kia's servers never contact the car. No local mocked test can establish Kia's
-internal wake behavior. The 12V value is a cloud snapshot, not a real-time voltage
-or an assurance that auxiliary battery health is good. Sleeping vehicles may not
-report charging transitions promptly, so adaptive mode can remain passive throughout
-a real charging session. This is intentional when evidence is insufficient.
+Both explicit charging true/1 and a recognized connected connector code are needed.
+Kia USA's `batteryPlugin` is a raw code, not a Boolean; 1..4 are treated as connected
+without inferring connector type. The observed EV6 value 2 alone never permits a
+wake. Python rereads cache immediately before a targeted live request. Unknown,
+future, timezone-free, regressing, contradictory or stale evidence fails closed.
+A stopped result immediately disables live refresh. Errors, unchanged live results
+and the continuous limit latch the episode passive until a newer, fresh stopped
+report; subsequent charging reports alone cannot rearm it. Same-car automatic and
+explicit selections share a latch, and a different car cannot clear it. Rotation
+reads remain passive. There is an unavoidable stop-versus-wake race between a
+preflight read and Kia processing a request. No locks/climate/start/charging-control
+commands are issued by MagicMirror polling.
 
-### History and diagnostics
+History keeps report and retrieval timestamps separately, ignores unchanged or
+missing report times in all modes, preserves missing values as null, and retains
+fresh charging changes at ten-minute spacing. 12V percentage remains a cloud
+snapshot, not a voltage or battery-health measurement. A missing/stale/future
+report cannot trigger a new 12V threshold/drain alert. Old retrieval-only history
+is not treated as verified measurement timing for a newly built alert state.
+History, tokens, authstate files, cache, environments, secrets and backups remain
+local and ignored. The separate security PR addresses browser credential handling;
+until adopted, private config.js credentials still reach MagicMirror's browser and
+socket path. Keep MagicMirror restricted to trusted/local clients; do not expose
+its config/socket endpoints publicly. Do not copy config.js into an issue.
 
-Existing ignored `cache/` history remains local. Adaptive history adds report time,
-retrieval time, charging flag and polling mode, and skips duplicate report timestamps;
-existing minimum sample spacing and retention still apply. No telemetry belongs in Git.
+### Diagnostics and complete replacement configuration
 
-Logs distinguish `cached cloud retrieval`, `active vehicle refresh`, `new vehicle
-telemetry`, `repeated cached telemetry`, polling/charging state transitions,
-`restart cooldown`, `hourly live limit`, `continuous active limit`,
-`session safety latch`, and `adaptive API error; passive backoff`. New policy logs
-contain no credentials, VINs, coordinates or raw responses. A new timestamp means
-a new cloud report, not independently verified physical vehicle state.
+Policy logs distinguish cache retrieval, live intent/result, new/repeated vehicle
+telemetry, mode transitions, restart cooldown, hourly/continuous limits, and
+passive API backoff. Backoff grows after consecutive failures and is account-wide;
+Python's existing authentication cooldown also survives restarts. Check these
+messages instead of logging raw API dumps, credential files or vehicle identifiers.
+A stale mode with a successful retrieval is expected when Kia has no fresh report.
 
-### Complete ready-to-replace module block
-
-Replace the existing Kia entry in `config.modules` with this complete object. Keep
-credentials only in the Pi's private MagicMirror config; do not commit it. The
-parentheses/semicolon in the example file make it syntax-checkable standalone;
-inside `modules: [...]`, paste the object `{ ... }` itself.
+Copy the complete object `{ ... }` below into `config.modules`, replacing the old
+Kia entry. The surrounding parentheses/semicolon are only for standalone syntax
+checking. Keep credentials only in the private configuration during the legacy
+upgrade; the separate security change provides a server-only alternative.
 
 ```javascript
 // Copy the complete object below into MagicMirror's config.modules array.
@@ -116,7 +123,7 @@ inside `modules: [...]`, paste the object `{ ... }` itself.
     brand: "KIA",
     region: "USA",
     adaptivePolling: {
-      enabled: true,
+      enabled: false,
       chargingInterval: 600000,
       pluggedInterval: 1800000,
       idleInterval: 3600000,
@@ -130,6 +137,8 @@ inside `modules: [...]`, paste the object `{ ... }` itself.
     refresh: false,
     forceRefreshTimeout: 0,
     updateInterval: 1800000,
+    maxRequestsPerHour: 12,
+    maxCloudRequestsPerHour: 60,
     units: "imperial",
     maxWidth: "320px",
     showTable: false,
@@ -169,48 +178,40 @@ inside `modules: [...]`, paste the object `{ ... }` itself.
 });
 ```
 
-### Deploy manually on either Raspberry Pi ARM64
+### Future deployment (not executed during hardening)
 
-No Pi was accessed during development. Run these commands locally on the selected
-Pi after reviewing the feature branch. Node.js 22 is the production baseline;
-Python setup uses the module-managed environment (Python >=3.12 required).
+After review/merge approval, run these on the chosen Pi as the MagicMirror user:
 
 ```bash
 node --version
 uname -m
-# Locate installations; select the intended checkout from the output.
 find "$HOME" /opt /srv -type f -path '*/MMM-KiaAccess/package.json' 2>/dev/null
-read -r -p 'Full path to the MMM-KiaAccess directory: ' MODULE
+read -r -p 'Full module directory from the output: ' MODULE
 cd "$MODULE" || exit 1
 git remote -v
 git status --short
-# Stop if there are local changes; preserve them before switching branches.
+# Stop here if tracked local changes exist. Preserve private config/token/cache
+# backups outside Git with umask 077 before updating.
 git fetch origin
-git switch feature/adaptive-polling
-git pull --ff-only origin feature/adaptive-polling
+git switch main
+git pull --ff-only origin main
 npm install
 node setup_python.js
 npm test
 npm run test:python
-# Derive MagicMirror root from the standard modules checkout layout.
 MM_ROOT=$(cd ../.. && pwd)
-test -f "$MM_ROOT/config/config.js" || exit 1
-cp "$MM_ROOT/config/config.js" "$MM_ROOT/config/config.js.backup.$(date +%Y%m%d%H%M%S)"
-nano "$MM_ROOT/config/config.js"
-# Replace the complete Kia block using the example above; enter private credentials.
 node --check "$MM_ROOT/config/config.js"
 ```
 
-Restart MagicMirror using its existing process manager. Discover the actual service
-with `pm2 list` or `systemctl --user list-units --type=service`; do not assume a
-service name. Use `pm2 logs <actual-name> --lines 200` or
-`journalctl --user -u <actual-service> -f` as appropriate and filter for
-`MMM-KiaAccess`. A terminal launch prints logs in that terminal. Expect cached reads
-and restart cooldown during the first hour, then active refresh only with fresh
-charging evidence. Compare new/repeated telemetry messages to evaluate reporting
-frequency. Verify stopped/disconnected states produce passive reads. For rollback,
-stop the mirror, switch to `main` in a clean checkout and restore the private config
-backup before restarting. No merge or physical vehicle validation is implied.
+Keep the working production block with `adaptivePolling.enabled: false`,
+`refresh: false`, `forceRefreshTimeout: 0`. No configuration edit is required to
+stay passive. If changing presentation later, replace the whole block above and
+retain private credentials. Discover the existing startup process with `pm2 list`
+or `systemctl --user list-units --type=service`; restart only the selected mirror
+using its actual process name after validation. For logs use `pm2 logs <name>` or
+`journalctl --user -u <service> -f`. Verify cached retrieval and no active refresh
+messages; never force a live refresh just to test logs. Real charging behavior,
+Kia internals and physical displays are not validated by mocked test success.
 
 ## TL;DR
 
@@ -834,7 +835,7 @@ cache when the data actually changed, so a fast rate costs almost nothing.
     // --- polling ---
     updateInterval: 30 * 60 * 1000,  // 30 min (mode C default: 5 min / push)
     retryInterval: 5 * 60 * 1000,
-    refresh: true,           // true = poll the car; false = Kia's cached copy
+    refresh: false,          // cached by default; true explicitly requests legacy live
     units: "imperial",       // imperial | metric
 
     // --- which attributes to show ([] = show everything) ---
@@ -939,10 +940,10 @@ depends on its brand, region and powertrain):
 | `fetchTimeout` | `90` | Seconds before the bridge process is killed |
 | `updateInterval` | `1800000` | ms between fetches. **Mode C** default: `300000` (push — fallback poll) or `30000` (poll) |
 | `retryInterval` | `300000` | ms before retrying after an error (**mode C** default: `30000`) |
-| `refresh` | `true` | `true` wakes the car; `false` uses Kia's server cache (no battery cost). Use `false` for a **brand-new car that hasn't synced yet** |
+| `refresh` | `false` | Cached by default. Explicit `true` requests legacy live refresh subject to account limits. Cached endpoints cannot guarantee no internal Kia vehicle contact. |
 | `forceRefreshTimeout` | `45` | seconds to wait for the `refresh: true` wake-up before falling back to Kia's cached copy for that poll. `0` = never wake the car (same as `refresh: false`) |
 | `backoffMax` | `8` | cap the post-failure exponential backoff at `retryInterval × this` |
-| `maxRequestsPerHour` | `0` | `0` = no cap; otherwise pause fetches once the cap is hit (protects the account) |
+| `maxRequestsPerHour` | `12` | Account polling cycles/hour, 1..24; invalid/zero uses 12. Separate maxCloudRequestsPerHour defaults to 60 actual HTTP sends/hour. |
 | `historyDays` | `60` | days of SoC / 12V history kept on disk (`cache/`) for the sparkline + drain alert |
 | `historyMinIntervalMinutes` | `30` | don't record history samples closer together than this |
 | `otpLifetimeDays` | `30` | assumed Kia refresh-token lifetime, used for the expiry warning |
@@ -1666,7 +1667,7 @@ reporting its last-known numbers forever.
 - **Backoff.** After a failure, retries slow down exponentially
   (`retryInterval`, ×2, ×4, … capped at `retryInterval × backoffMax`) and reset
   on the next success.
-- **Request cap.** `maxRequestsPerHour` (default off) pauses fetching once the cap
+- **Request cap.** `maxRequestsPerHour` (default 12) pauses fetching once the cap
   is hit — Kia soft-locks accounts that poll too hard.
 - **Auth-failure cooldown.** 3 consecutive re-login failures in a row (bad
   credentials, or `hyundai_kia_connect_api` itself choking on an unexpected

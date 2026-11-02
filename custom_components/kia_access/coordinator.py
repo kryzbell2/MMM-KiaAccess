@@ -1252,7 +1252,7 @@ class KiaAccessCoordinator(DataUpdateCoordinator):
             return
         cutoff = time.time() * 1000 - V12_HISTORY_HOURS * 3600e3
         self._v12_history = [h for h in self._v12_history if h["t"] >= cutoff]
-        self._v12_history.append({"t": t, "v12": v12})
+        self._v12_history.append({"t": t, "v12": v12, "reportedAt": reported.isoformat()})
 
     def _update_failed(self, msg: str) -> UpdateFailed:
         """UpdateFailed for a failed poll. The first failure after a success

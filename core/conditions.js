@@ -172,8 +172,8 @@
       threshold("ev_battery_low", num(s.batteryPct), checkCfg(cfg, "evBatteryLow"), "EV battery");
       threshold("ev_battery_critical", num(s.batteryPct), checkCfg(cfg, "evBatteryCritical"), "EV battery critically");
     }
-    threshold("battery_12v_low", num(s.car12vPct), checkCfg(cfg, "battery12vLow"), "12V battery");
-    threshold("battery_12v_critical", num(s.car12vPct), checkCfg(cfg, "battery12vCritical"), "12V battery critically");
+    threshold("battery_12v_low", s.battery12vFresh === false ? null : num(s.car12vPct), checkCfg(cfg, "battery12vLow"), "12V battery");
+    threshold("battery_12v_critical", s.battery12vFresh === false ? null : num(s.car12vPct), checkCfg(cfg, "battery12vCritical"), "12V battery critically");
 
     // ---- vehicle fault lamps (brake fluid, 12V system, ABS, airbag, …) ----
     var cFault = checkCfg(cfg, "vehicleFault");
@@ -190,12 +190,13 @@
     // ---- 12V draining while parked ----
     var cVD = checkCfg(cfg, "battery12vDrain");
     if (cVD.enabled) {
-      var parked = s.carOn !== true && s.charging !== true && s.plugged !== true;
+      var parked = s.battery12vFresh !== false && s.carOn !== true && s.charging !== true && s.plugged !== true;
       var overMs = (num(cVD.overHours) || 12) * 3600e3;
       var drop = num(cVD.dropPct) || 8;
       var recent = (s.history || [])
         .filter(function (h) {
-          return h && num(h.v12) != null && Date.now() - h.t <= overMs;
+          var t=h && (h.reportedAt ? Date.parse(h.reportedAt) : s.battery12vFresh == null ? h.t : NaN);
+          return h && num(h.v12) != null && isFinite(t) && Date.now()>=t && Date.now()-t<=overMs;
         })
         .sort(function (a, b) { return a.t - b.t; });
       var delta = recent.length >= 2 ? num(recent[0].v12) - num(recent[recent.length - 1].v12) : null;

@@ -815,9 +815,16 @@ def fetch(job, token_file=None):
             try:
                 if wake_vin:
                     for v in _select_vehicles(vm, wake_vin):
+                        if job.get("_wakeBudget"):
+                            job["_wakeBudget"].reserve("wake")
                         vm.force_refresh_vehicle_state(v.id)
                 else:
-                    vm.force_refresh_all_vehicles_states()
+                    if job.get("_wakeBudget"):
+                        for v in vm.vehicles.values():
+                            job["_wakeBudget"].reserve("wake")
+                            vm.force_refresh_vehicle_state(v.id)
+                    else:
+                        vm.force_refresh_all_vehicles_states()
             except Exception as exc:
                 err["e"] = exc
 
@@ -840,8 +847,8 @@ def fetch(job, token_file=None):
                 f"live wake-up timed out after {int(timeout)}s — will retry next cycle"
             )
         elif "e" in err:
-            if adaptive:
-                raise ClientError("adaptive live refresh failed") from err["e"]
+            if adaptive or job.get("_wakeBudget"):
+                raise ClientError("vehicle refresh failed; passive backoff") from err["e"]
             meta_note = f"live wake-up failed: {err['e']}"
     if not adaptive or adaptive_live:
         _refresh_cached_state(vm, job)

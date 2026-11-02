@@ -16,5 +16,6 @@
     "ev_battery_low": true,
     "unlocked": true,
     "door_open": true
-  }
+  },
+  "reportedMinutesAgo": 5
 }

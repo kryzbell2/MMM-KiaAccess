@@ -1,12 +1,19 @@
 "use strict";
-const DEFAULTS = Object.freeze({ enabled: true, chargingInterval: 600000, pluggedInterval: 1800000,
+const DEFAULTS = Object.freeze({ enabled: false, chargingInterval: 600000, pluggedInterval: 1800000,
   idleInterval: 3600000, staleInterval: 3600000, statusMaxAge: 1200000,
   liveRefreshTimeout: 30, maxLiveRequestsPerHour: 6, maxContinuousActiveMinutes: 90 });
 function options(value) {
   const c = Object.assign({}, DEFAULTS, value);
+  c.enabled = !!value && value.enabled === true;
   for (const k of Object.keys(DEFAULTS).filter(k => k !== "enabled")) {
     if (!Number.isFinite(c[k]) || c[k] <= 0) c[k] = DEFAULTS[k];
   }
+  c.chargingInterval = Math.max(c.chargingInterval, 600000);
+  c.pluggedInterval = Math.max(c.pluggedInterval, 1800000);
+  c.idleInterval = Math.max(c.idleInterval, 3600000);
+  c.staleInterval = Math.max(c.staleInterval, 3600000);
+  c.maxLiveRequestsPerHour = Math.floor(c.maxLiveRequestsPerHour);
+  c.liveRefreshTimeout = Math.min(c.liveRefreshTimeout, 30);
   c.statusMaxAge = Math.min(c.statusMaxAge, DEFAULTS.statusMaxAge);
   c.maxLiveRequestsPerHour = Math.min(c.maxLiveRequestsPerHour, 6);
   c.maxContinuousActiveMinutes = Math.min(c.maxContinuousActiveMinutes, 90);
@@ -30,7 +37,7 @@ function mode(v, c, now) {
   return "stale";
 }
 function accountBudget(now = Date.now()) {
-  return { bootUntil: now + 3600000, times: [], busy: false, backoffUntil: 0, vehicles: new Map() };
+  return { bootUntil: now + 3600000, times: [], busy: false, backoffUntil: 0, failures: 0, sessions: {}, reqTimes: [], nextAt: 0, vehicles: new Map() };
 }
 class Poller {
   constructor(now = Date.now(), account = accountBudget(now)) {
@@ -55,7 +62,10 @@ class Poller {
     if (Number.isFinite(t) && t <= now && (!Number.isFinite(previous) || t > previous)) this.highWater = t;
     this.last = this.mode === "stale" ? null : v;
     this.failures = 0;
-    return this.interval(c);
+    const interval=this.interval(c);
+    // During the one-time unknown-budget cooldown keep checking only the
+    // cloud, so a newly published charging report is not hidden by a 60m timer.
+    return now<this.account.bootUntil ? Math.min(interval,600000) : interval;
   }
   interval(c) { return c[this.mode === "charging" ? "chargingInterval" : this.mode === "plugged" ? "pluggedInterval" : this.mode === "idle" ? "idleInterval" : "staleInterval"]; }
   reserve(c, now, multi = false) {

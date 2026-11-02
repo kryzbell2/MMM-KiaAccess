@@ -264,7 +264,12 @@ console.log("-- overlapping refreshes: a second handleFetch() for the same id mu
 
     // now that it's resolved, a THIRD call must spawn again (inFlight cleared)
     helper.handleFetch(config);
-    assert.strictEqual(spawnCount, 2, "once the in-flight fetch resolves, the NEXT call must spawn normally");
+    assert.strictEqual(spawnCount, 1, "minimum account interval still applies after completion");
+    const realNow = Date.now;
+    Date.now = () => realNow() + 300001;
+    try { helper.handleFetch(config); } finally { Date.now = realNow; }
+    assert.strictEqual(spawnCount, 2, "next eligible call can spawn after the minimum interval");
+    pendingChildren[1].emit("error", new Error("mock test cleanup"));
   } finally {
     child_process.spawn = origSpawn;
   }

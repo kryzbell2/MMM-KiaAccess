@@ -14,5 +14,6 @@
     "ev_battery_low": true,
     "vehicle_fault": false,
     "battery_12v_critical": false
-  }
+  },
+  "reportedMinutesAgo": 5
 }
