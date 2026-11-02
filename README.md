@@ -9,6 +9,16 @@ This fork preserves the upstream project below; Pi updates are performed manuall
 
 [![CI](https://github.com/Legal-Copy7045/MMM-KiaAccess/actions/workflows/ci.yml/badge.svg)](https://github.com/Legal-Copy7045/MMM-KiaAccess/actions/workflows/ci.yml)
 
+## Server-only credentials (separate security change)
+
+Use [server credential profiles](docs/SERVER_CREDENTIALS.md) to keep Kia secrets
+outside browser-served config.js. This is an explicit future migration; no working
+authentication or production configuration is automatically changed. The complete
+[public Bluebell block](examples/bluebell.server.config.example.js) contains only a
+profile name and presentation/cached-only settings. Node reads the private account
+file from its own environment and rejects browser backend-option overrides.
+Legacy config.js credentials remain exposed until removed from that configuration.
+
 ## Safe Kia polling (MagicMirror)
 
 **Adaptive polling is disabled by default and requires the literal `enabled: true`.**

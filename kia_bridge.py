@@ -47,7 +47,7 @@ def main():
         else:
             protection = job.get("requestProtection")
             if protection:
-                ledger = os.path.join(kia_client._HERE, "cache", "request-budget-" + kia_client._job_account_hash(job) + ".json")
+                ledger = os.path.join(job.get("stateDirectory") or kia_client._HERE, "cache", "request-budget-" + kia_client._job_account_hash(job) + ".json")
                 budget = cloud_budget.Budget(ledger, protection.get("maxCloudRequestsPerHour", 60))
                 # Reserve each actual per-vehicle wake, including legacy all-
                 # vehicle jobs, before handing it to the library.
@@ -64,11 +64,11 @@ def main():
     except cloud_budget.BudgetExceeded:
         print(json.dumps({"ok": False, "error": "cloud request limit or guard unavailable; passive backoff"}))
     except kia_client.OtpRequired as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}))
+        print(json.dumps({"ok": False, "error": "Kia enrollment required; use the local enrollment workflow"}))
     except kia_client.ClientError as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}))
+        print(json.dumps({"ok": False, "error": "Kia request failed; passive backoff"}))
     except Exception as exc:  # noqa: BLE001
-        print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}))
+        print(json.dumps({"ok": False, "error": f"Kia request failed ({type(exc).__name__}); passive backoff"}))
     return 0
 
 

@@ -58,13 +58,13 @@ def _job_account_hash(job) -> str:
 def account_token_file(job) -> str:
     """The token file THIS job's account owns -- distinct per (region, brand,
     username), so two differently-configured accounts never share one file."""
-    return os.path.join(_HERE, f"token-{_job_account_hash(job)}.json")
+    return os.path.join(job.get("stateDirectory") or _HERE, f"token-{_job_account_hash(job)}.json")
 
 
 def _auth_state_file(job) -> str:
     """Per-account, alongside the token file (same _HERE + account-hash
     convention account_token_file() already uses)."""
-    return os.path.join(_HERE, f"authstate-{_job_account_hash(job)}.json")
+    return os.path.join(job.get("stateDirectory") or _HERE, f"authstate-{_job_account_hash(job)}.json")
 
 
 # A live token that fails to re-auth means Kia is rejecting THIS account's
@@ -619,8 +619,12 @@ def connect(job, token_file=None):
     """Return (vm, enrolled_at). Raises OtpRequired / ClientError."""
     account_hash = _job_account_hash(job)
     token_file = (token_file or job.get("tokenFile")
-                  or os.path.join(_HERE, f"token-{account_hash}.json"))
-    _migrate_legacy_token(token_file, account_hash)
+                  or account_token_file(job))
+    if job.get("stateDirectory"):
+        if not os.path.isabs(job["stateDirectory"]) or not os.path.isfile(token_file):
+            raise OtpRequired("private token missing; explicitly migrate existing state or enroll locally")
+    else:
+        _migrate_legacy_token(token_file, account_hash)
     try:
         from hyundai_kia_connect_api import VehicleManager
         from hyundai_kia_connect_api.Token import Token
