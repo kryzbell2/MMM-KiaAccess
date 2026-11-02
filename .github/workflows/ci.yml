@@ -68,7 +68,7 @@ jobs:
         run: pip install -r requirements.txt
       - name: Byte-compile
         run: |
-          python -m py_compile migrate_server_state.py enroll_server.py cloud_budget.py kia_bridge.py enroll.py kia_client.py conditions.py vehicle_state.py sessions.py analytics.py
+          python -m py_compile diagnose_polling_locks.py migrate_server_state.py enroll_server.py cloud_budget.py kia_bridge.py enroll.py kia_client.py conditions.py vehicle_state.py sessions.py analytics.py
           python -m py_compile custom_components/kia_access/*.py
       - name: Spec sanity
         run: python test/spec_check.py
@@ -79,6 +79,7 @@ jobs:
           python test/adaptive_polling_test.py
           python test/cloud_budget_test.py
           python test/server_enrollment_test.py
+          python test/lock_diagnostics_test.py
       - name: kia_client.dump_vehicle
         run: python test/dump_vehicle_test.py
       - name: Region numbering matches the library

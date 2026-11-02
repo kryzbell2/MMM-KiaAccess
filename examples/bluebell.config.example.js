@@ -1,9 +1,9 @@
 // Copy the complete object below into MagicMirror's config.modules array.
 // Enter credentials ONLY in ~/MagicMirror/config/config.js on each Pi.
-({
+{
   module: "MMM-KiaAccess",
   position: "bottom_center",
-  header: "Bluebell",
+  header: "Blue Beauty",
   config: {
     username: "YOUR_KIA_EMAIL",
     password: "YOUR_KIA_PASSWORD",
@@ -63,4 +63,4 @@
       location: { enabled: false, map: false }
     }
   }
-});
+}

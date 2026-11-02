@@ -1,8 +1,8 @@
 # Kia Access — one shared engine for Home Assistant **and** MagicMirror²
 
-## Bluebell EV6 installation
+## Blue Beauty EV6 installation
 
-For this fork's Bluebell dashboard, use the [install/reinstall guide](docs/BLUEBELL.md)
+For this fork's Blue Beauty dashboard, use the [install/reinstall guide](docs/BLUEBELL.md)
 and [complete credential-free configuration example](examples/bluebell.config.example.js).
 Enter credentials only on your Pi and enroll each installation independently.
 This fork preserves the upstream project below; Pi updates are performed manually.
@@ -14,7 +14,7 @@ This fork preserves the upstream project below; Pi updates are performed manuall
 Use [server credential profiles](docs/SERVER_CREDENTIALS.md) to keep Kia secrets
 outside browser-served config.js. This is an explicit future migration; no working
 authentication or production configuration is automatically changed. The complete
-[public Bluebell block](examples/bluebell.server.config.example.js) contains only a
+[public Blue Beauty block](examples/bluebell.server.config.example.js) contains only a
 profile name and presentation/cached-only settings. Node reads the private account
 file from its own environment and rejects browser backend-option overrides.
 Legacy config.js credentials remain exposed until removed from that configuration.
@@ -71,6 +71,35 @@ budget JSON merely to restore activity: it contains safety limits. Corrupt HTTP
 ledgers require operator inspection and conservative recovery after an hour with
 no requests. No new database or automatic token migration is introduced.
 
+### Read-only orphan-lock diagnostics
+
+Run `python3 diagnose_polling_locks.py` from the module directory as the service
+user, with the same `MMM_KIA_SECRETS_FILE` environment as MagicMirror. It inspects
+both the legacy `cache/` and, when configured, the private `state/cache/` beside
+the secret file. It does not open that secret file or any lock/ledger contents.
+To inspect only selected locations, use repeated `--cache-dir /absolute/path`.
+
+```bash
+python3 diagnose_polling_locks.py
+python3 diagnose_polling_locks.py --cache-dir /absolute/private/state/cache --json
+```
+
+Only recognized polling and HTTP-budget lock names are reported. Status includes
+recent, old (default 15-minute threshold), future-dated, disappeared, inaccessible
+and skipped-symlink entries. `--older-than-minutes` adjusts the candidate threshold;
+**age is never proof of an orphan** because locks contain no owner PID. The output
+is a point-in-time snapshot, not an assertion that no request is running. Exit 0
+means the scan completed (even if locks exist); exit 1 means some selected metadata
+could not be inspected, and exit 2 means invalid arguments.
+
+No locks are deleted, no budgets reset, no processes stopped, and no API calls or
+refreshes initiated. The command always prints recovery guidance: identify/stop
+the actual mirror process and verify all associated bridge processes have ended;
+re-run diagnostics; preserve private logs and budget JSON; only then may an operator
+manually remove a specific confirmed orphan `.lock`. If ownership is uncertain,
+leave it in place. Never delete budget JSON/token/history to bypass limits, and
+restart only with cached-only settings. The diagnostic does not perform recovery.
+
 ### Adaptive state and history
 
 Explicit opt-in uses minimum cadences of 10 minutes charging, 30 minutes plugged
@@ -115,17 +144,18 @@ messages instead of logging raw API dumps, credential files or vehicle identifie
 A stale mode with a successful retrieval is expected when Kia has no fresh report.
 
 Copy the complete object `{ ... }` below into `config.modules`, replacing the old
-Kia entry. The surrounding parentheses/semicolon are only for standalone syntax
-checking. Keep credentials only in the private configuration during the legacy
+Kia entry. The example is a bare object, ready to paste into `modules: []`; it
+has no expression wrapper. Add array commas between adjacent entries as usual.
+Keep credentials only in the private configuration during the legacy
 upgrade; the separate security change provides a server-only alternative.
 
 ```javascript
 // Copy the complete object below into MagicMirror's config.modules array.
 // Enter credentials ONLY in ~/MagicMirror/config/config.js on each Pi.
-({
+{
   module: "MMM-KiaAccess",
   position: "bottom_center",
-  header: "Bluebell",
+  header: "Blue Beauty",
   config: {
     username: "YOUR_KIA_EMAIL",
     password: "YOUR_KIA_PASSWORD",
@@ -185,7 +215,7 @@ upgrade; the separate security change provides a server-only alternative.
       location: { enabled: false, map: false }
     }
   }
-});
+}
 ```
 
 ### Future deployment (not executed during hardening)

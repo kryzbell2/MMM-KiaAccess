@@ -1,4 +1,4 @@
-# Bluebell: two MagicMirror Raspberry Pis
+# Blue Beauty: two MagicMirror Raspberry Pis
 
 The complete [configuration example](../examples/bluebell.config.example.js)
 reproduces the EV6 dashboard confirmed working in the October 31, 2026 chat:
@@ -92,7 +92,7 @@ PY
 
 Privately back up `~/MagicMirror/config/config.js` outside Git. Open the example
 and copy the complete object from `{` through the matching `}` into the
-`modules: [...]` array in that config. Do not copy the outer `(` or `);`.
+`modules: [...]` array in that config. The examples have no wrapper; paste the complete bare object directly.
 Add a comma between module objects. Replace the two credential placeholders
 only in the Pi's private config.js; keep the blank PIN unless your account uses one.
 If replacing an existing Kia block, replace the whole block, not individual lines.

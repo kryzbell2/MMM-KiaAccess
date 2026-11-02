@@ -1,9 +1,9 @@
 // Copy the complete object below into MagicMirror's config.modules array.
 // Credentials belong only in the private server profile outside MagicMirror.
-({
+{
   module: "MMM-KiaAccess",
   position: "bottom_center",
-  header: "Bluebell",
+  header: "Blue Beauty",
   config: {
     credentialProfile: "bluebell",
     brand: "KIA",
@@ -61,4 +61,4 @@
       location: { enabled: false, map: false }
     }
   }
-});
+}

@@ -1,6 +1,7 @@
 # Server-only Kia credential profiles
 
-This security change is reviewed separately and stacked on the polling-safety PR.
+This security change is reviewed separately in PR #3 against main; polling-safety
+PR #2 has already been merged.
 It does not migrate any installation, enroll an account, rewrite config.js or
 invalidate a token automatically. The explicit migration helper moves existing
 state only when the operator requests it after stopping the module. Keep both mirrors unchanged during review.
@@ -100,7 +101,10 @@ shared module-cache files, not unrelated config backups or other accounts. Remov
 any remaining secret-bearing served files to private storage before reopening
 network access. Do not leave a private backup of config.js in a public directory.
 Use the complete public block in `examples/bluebell.server.config.example.js` to
-replace the old Kia block. **Remove** username/password/PIN/token fields entirely
+replace the old Kia block. It is a bare object with no `({ ... });` wrapper;
+paste it directly into `modules: []`, keeping the normal commas between entries.
+The public profile name `bluebell` stays unchanged; the displayed header is
+“Blue Beauty”. **Remove** username/password/PIN/token fields entirely
 from public config.js, including environment expressions that resolve to secrets.
 Do not reference the private JSON from config.js: MagicMirror may serialize the
 result to clients. This server-profile mode must be selected by the Node process
@@ -126,6 +130,30 @@ Enrollment is a separate, explicit operation; tests never execute it against Kia
 OTP codes stay in the user's terminal. Enrollment subprocess environment variables
 remain readable to sufficiently privileged local processes; trust/secure the OS
 account. No frontend or GitHub upload is involved.
+
+## Diagnose persistent request locks without changing state
+
+Use the same service-user environment, particularly `MMM_KIA_SECRETS_FILE`:
+
+```bash
+python3 diagnose_polling_locks.py
+# Or select only the known private cache; this path is an example, not a guess.
+python3 diagnose_polling_locks.py --cache-dir /absolute/private/state/cache --json
+```
+
+The command derives the private cache directory from the environment filename
+without reading the credential file. It also checks legacy cache by default.
+If that environment is not present in your terminal, use `--cache-dir` explicitly
+so a missing legacy cache is not mistaken for inspection of the running service's
+private cache. No credentials, raw lock data or budget contents are displayed.
+
+Old locks are only candidates: current locks do not record an owner PID. Stop the
+actual service and ensure its bridge processes have ended, then re-run and inspect
+remaining locks locally. Manually remove only a positively confirmed orphan lock;
+do not remove quota JSON, token files or history. Restart cached-only, without
+forcing a vehicle refresh. The command performs none of those recovery actions.
+See README for statuses, exit codes and the adjustable age threshold. A symlink
+or unreadable location is reported rather than followed or treated as healthy.
 
 ## Verify without revealing secrets
 
