@@ -37,6 +37,8 @@ const isoline = require("./core/isoline.js");
 const webhook = require("./webhook.js");
 const exporter = require("./exporter.js");
 
+const AP = require("./adaptive_polling.js");
+
 const CACHE_DIR = path.join(__dirname, "cache");
 
 // How many consecutive SUCCESSFUL account-wide fetches a still-configured
@@ -84,6 +86,8 @@ function resolvePython(configured) {
 module.exports = NodeHelper.create({
   start() {
     this.inFlight = {};
+    this.adaptive = {}; // vehicle-scoped evidence, cadence and safety latch
+    this.adaptiveAccounts = {}; // account-scoped live budget and overlap guard
     this.mqttClients = {};
     this.mqttPrefixOwners = {}; // topicPrefix -> the connection key that first claimed it
     this.promServers = {}; // key -> exporter.PromServer
@@ -415,6 +419,25 @@ module.exports = NodeHelper.create({
     });
   },
 
+  adaptivePolicy(id, config, vehicle) {
+    const key = this.acctKeyFor(config);
+    const account = this.adaptiveAccounts[key] || (this.adaptiveAccounts[key] = AP.accountBudget());
+    const vehicleKey = vehicleIdentity(vehicle);
+    if (vehicleKey) {
+      // Auto-selection and explicit selection of the same physical car must
+      // share its episode latch, not just the account-wide hourly budget.
+      let policy = account.vehicles.get(vehicleKey);
+      if (!policy) {
+        const current = this.adaptive[id];
+        policy = current && !current.vehicleKey ? current : new AP.Poller(Date.now(), account);
+        policy.vehicleKey = vehicleKey;
+        account.vehicles.set(vehicleKey, policy);
+      }
+      this.adaptive[id] = policy;
+    }
+    return this.adaptive[id] || (this.adaptive[id] = new AP.Poller(Date.now(), account));
+  },
+
   handleFetch(config) {
     const id = this.identifierFor(config);
     const s = this.st(id);
@@ -511,6 +534,18 @@ module.exports = NodeHelper.create({
       return;
     }
 
+    const apConfig = AP.options(config.adaptivePolling);
+    const adaptive = config.adaptivePolling && apConfig.enabled !== false;
+    let policy, decision;
+    if (adaptive) {
+      policy = this.adaptivePolicy(id, config);
+      if (policy.account.busy) return;
+      const due = Math.max(policy.due, policy.account.backoffUntil);
+      if (Date.now() < due) return this._reportServe(id, config, rotating, {
+        retryAfterMs: due - Date.now(), note: "adaptive polling wait"
+      });
+    }
+
     // ---- request/hour guard (Kia source only) ----
     // Keyed by ACCOUNT (region|brand|username), not `id` -- `id` includes the
     // vin-or-"auto" suffix, so two module configs covering the same real Kia
@@ -532,6 +567,10 @@ module.exports = NodeHelper.create({
         note: `paused — ${cap} requests/hour cap`,
         retryAfterMs
       });
+    }
+    if (policy) {
+      decision = policy.reserve(apConfig, now, rotating);
+      Log.info("[MMM-KiaAccess] " + decision.reason + (decision.live ? " requested; preflight pending" : ""));
     }
     acct.reqTimes.push(now);
     this.inFlight[id] = true;
@@ -560,7 +599,9 @@ module.exports = NodeHelper.create({
       region: config.region || "USA",
       vin: rotating ? "" : config.vin || "",
       allVehicles: rotating,
-      refresh: config.refresh !== false,
+      refresh: adaptive ? decision.live : config.refresh !== false,
+      adaptivePolling: adaptive ? apConfig : null,
+      wakeVin: adaptive ? config.vin || "" : "",
       geocode: config.geocode === true,
       // honour an explicit 0 (cache-only) — don't let `|| 45` clobber it
       forceRefreshTimeout:
@@ -569,6 +610,10 @@ module.exports = NodeHelper.create({
           : Number(config.forceRefreshTimeout) || 0
     };
 
+    if (adaptive) {
+      job.forceRefreshTimeout = apConfig.liveRefreshTimeout;
+      policy.account.busy = true;
+    }
     let stdout = "";
     let stderr = "";
     let child;
@@ -576,6 +621,7 @@ module.exports = NodeHelper.create({
       child = spawn(pythonBin, [script], { stdio: ["pipe", "pipe", "pipe"] });
     } catch (err) {
       this.inFlight[id] = false;
+      if (policy) { policy.account.busy = false; policy.fail(apConfig, Date.now()); }
       return this._reportFailure(id, config, rotating, `could not start ${pythonBin}: ${err.message}`);
     }
 
@@ -591,7 +637,8 @@ module.exports = NodeHelper.create({
     const reportOnce = (message) => {
       if (settled) return;
       settled = true;
-      this._reportFailure(id, config, rotating, message);
+      if (policy) { policy.account.busy = false; policy.fail(apConfig, Date.now()); }
+      this._reportFailure(id, config, rotating, adaptive ? "adaptive API error; passive backoff" : message);
     };
 
     child.on("error", (err) => {
@@ -606,6 +653,7 @@ module.exports = NodeHelper.create({
       clearTimeout(killTimer);
       this.inFlight[id] = false;
       if (settled) return; // "error" already reported this exact failure
+      if (policy) policy.account.busy = false;
       this._handleBridgeClose(id, config, rotating, code, stdout, stderr, reportOnce);
     });
 
@@ -631,6 +679,10 @@ module.exports = NodeHelper.create({
       result = JSON.parse(lastJsonLine(stdout));
     } catch (e) {
       return reportOnce(`bridge produced no JSON (exit ${code}). ${truncate(stderr || stdout)}`);
+    }
+    if (config.adaptivePolling && AP.options(config.adaptivePolling).enabled !== false &&
+        result.ok && typeof (result.meta && result.meta.adaptiveLive) !== "boolean") {
+      return reportOnce("adaptive bridge returned no verifiable refresh metadata");
     }
     // kia_client.fetch() itself now refuses (result.ok === false) a
     // multi-vehicle account with no VIN configured, UNLESS this is a
@@ -766,7 +818,22 @@ module.exports = NodeHelper.create({
     const s = this.st(id);
     const vehicle = payload.vehicle || {};
     payload._meta = Object.assign({ fetchedAt: new Date().toISOString(), failStreak: 0 }, payload._meta || {});
-    if (payload._meta.warning) Log.warn("[MMM-KiaAccess] " + payload._meta.warning);
+    const apConfig = AP.options(config.adaptivePolling);
+    const adaptive = config.adaptivePolling && apConfig.enabled !== false && config.source !== "homeassistant";
+    if (payload._meta.warning) Log.warn("[MMM-KiaAccess] " +
+      (adaptive ? "unverifiable telemetry; passive latch" : payload._meta.warning));
+    if (adaptive) {
+      const policy = this.adaptivePolicy(id, config, vehicle);
+      const oldMode = policy.mode;
+      const repeated = AP.timestamp(vehicle) === AP.timestamp(policy.last);
+      Log.info("[MMM-KiaAccess] " + (payload._meta.adaptiveLive ? "active vehicle refresh result" : "cached cloud retrieval result"));
+      const delay = policy.observe(vehicle, apConfig, Date.now(), payload._meta.adaptiveLive === true, !!(payload._meta.note || payload._meta.warning));
+      policy.due = Date.now() + delay;
+      payload._meta.retryAfterMs = delay;
+      payload._meta.pollingMode = policy.mode;
+      Log.info("[MMM-KiaAccess] " + (repeated ? "repeated cached telemetry" : "new vehicle telemetry") +
+        (oldMode !== policy.mode ? "; polling/charging state " + oldMode + " -> " + policy.mode : ""));
+    }
 
     // did the vehicle data actually move since last poll? (mode C polls often)
     const vehJson = JSON.stringify(vehicle);
@@ -780,13 +847,20 @@ module.exports = NodeHelper.create({
     const sample = {
       t: Date.now(),
       ev: numOrNull(vehicle.ev_battery_percentage),
-      v12: numOrNull(vehicle.car_battery_percentage)
+      v12: numOrNull(vehicle.car_battery_percentage),
+      reportedAt: vehicle.last_updated_at || null,
+      fetchedAt: payload._meta.fetchedAt,
+      charging: vehicle.ev_battery_is_charging,
+      pollingMode: payload._meta.pollingMode
     };
+    const previousReport = s.lastGood && s.lastGood.vehicle && s.lastGood.vehicle.last_updated_at;
+    const newReport = Number.isFinite(AP.timestamp(vehicle)) && sample.reportedAt !== previousReport &&
+      (!last || sample.reportedAt !== last.reportedAt);
     let histChanged = false;
-    if (!last || sample.t - last.t >= minGap) {
+    if ((!adaptive || newReport) && (!last || sample.t - last.t >= minGap)) {
       s.history.push(sample);
       histChanged = true;
-    } else if (last.ev !== sample.ev || last.v12 !== sample.v12) {
+    } else if (last && (!adaptive || newReport) && (last.ev !== sample.ev || last.v12 !== sample.v12 || (adaptive && last.charging !== sample.charging))) {
       s.history[s.history.length - 1] = sample;
       histChanged = true;
     }

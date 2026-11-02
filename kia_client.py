@@ -770,9 +770,36 @@ def _no_match_error(vm, vin) -> "ClientError":
 def fetch(job, token_file=None):
     vm, enrolled_at = connect(job, token_file)
 
+    adaptive = job.get("adaptivePolling")
+    adaptive_live = False
+    adaptive_before = None
+    if adaptive:
+        job = dict(job, refresh=job.get("refresh") is True)
+        # Recheck server cache immediately before considering a targeted wake.
+        _refresh_cached_state(vm, job)
+        candidates = _select_vehicles(vm, job.get("vin", ""))
+        if len(candidates) != 1 or job.get("allVehicles"):
+            job = dict(job, refresh=False)
+        elif job.get("refresh"):
+            from datetime import datetime, timezone
+            candidate = candidates[0]
+            stamp = getattr(candidate, "last_updated_at", None)
+            age = None
+            if isinstance(stamp, datetime) and stamp.tzinfo is not None:
+                age = (datetime.now(timezone.utc) - stamp).total_seconds()
+            charging = getattr(candidate, "ev_battery_is_charging", None)
+            plug = getattr(candidate, "ev_battery_is_plugged_in", None)
+            connected = plug is True or (type(plug) is int and 1 <= plug <= 4)
+            fresh = age is not None and 0 <= age <= min(float(adaptive.get("statusMaxAge", 1200000)), 1200000) / 1000
+            adaptive_before = stamp
+            adaptive_live = fresh and connected and (charging is True or type(charging) is int and charging == 1)
+            job = dict(job, refresh=adaptive_live, wakeVin=job.get("vin") or _vehicle_key(candidate))
     meta_note = None
     _raw_to = job.get("forceRefreshTimeout", 45)
     timeout = float(_raw_to) if _raw_to is not None else 45.0
+    if adaptive and timeout <= 0:
+        adaptive_live = False
+        job = dict(job, refresh=False)
     # refresh:false (MM) or a zero/negative wake-up timeout (HA "Live wake-up
     # timeout = 0") both mean: don't wake the car, just read Kia's server cache.
     if job.get("refresh", True) and timeout > 0:
@@ -813,10 +840,17 @@ def fetch(job, token_file=None):
                 f"live wake-up timed out after {int(timeout)}s — will retry next cycle"
             )
         elif "e" in err:
+            if adaptive:
+                raise ClientError("adaptive live refresh failed") from err["e"]
             meta_note = f"live wake-up failed: {err['e']}"
-    _refresh_cached_state(vm, job)
+    if not adaptive or adaptive_live:
+        _refresh_cached_state(vm, job)
 
     selected = _select_vehicles(vm, job.get("vin", ""))
+    if adaptive_live:
+        after = getattr(selected[0], "last_updated_at", None) if len(selected) == 1 else None
+        if after is None or after.tzinfo is None or after <= adaptive_before:
+            meta_note = "adaptive live refresh returned unverifiable telemetry; passive latch"
     if not selected:
         raise _no_match_error(vm, job.get("vin", ""))
     if not job.get("vin") and not job.get("allVehicles") and len(selected) > 1:
@@ -842,6 +876,8 @@ def fetch(job, token_file=None):
     vehicles = [dump_vehicle(v, job.get("region", "USA")) for v in selected]
 
     meta = {}
+    if adaptive:
+        meta["adaptiveLive"] = adaptive_live
     if meta_note:
         meta["note"] = meta_note
     if enrolled_at:

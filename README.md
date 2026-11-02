@@ -9,6 +9,209 @@ This fork preserves the upstream project below; Pi updates are performed manuall
 
 [![CI](https://github.com/Legal-Copy7045/MMM-KiaAccess/actions/workflows/ci.yml/badge.svg)](https://github.com/Legal-Copy7045/MMM-KiaAccess/actions/workflows/ci.yml)
 
+## Adaptive polling (MagicMirror, Kia source)
+
+Adaptive polling is enabled by default. The module starts with cached cloud reads,
+then uses the vehicle's timezone-qualified `last_updated_at` (not fetch time) to
+choose 10 minutes while charging, 30 minutes connected but stopped, and 60 minutes
+unplugged, unknown or stale. Set `adaptivePolling: { enabled: false }` to retain
+legacy `refresh`, `forceRefreshTimeout`, `updateInterval` and retry behavior.
+Adaptive mode owns the live-refresh decision independently of legacy `refresh`.
+Home Assistant source scheduling is unchanged. Rotate/multiple-vehicle reads are
+cache-only in adaptive mode; use one module block for this EV6.
+
+The complete configuration below contains all defaults (intervals/statusMaxAge in
+milliseconds, liveRefreshTimeout in seconds, continuous limit in minutes). Partial
+adaptive settings inherit defaults. Invalid positive-number settings fall back to
+defaults; status age and live limits cannot exceed the documented safety defaults.
+Zero does not disable a safeguard. The maximum limits are 6 attempts per rolling
+hour and 90 minutes per active episode.
+
+### Vehicle and 12V safeguards
+
+A connected cable is not charging evidence. Both explicit charging and a recognized
+connected code are required, with a vehicle report no older than 20 minutes. Before
+every targeted wake, Python rereads the cloud cache and checks the same conditions.
+No locks, climate, startup or charging-control commands are sent by adaptive polling.
+
+Charging evidence, sampling cadence and the episode latch are isolated per vehicle;
+one vehicle's stopped report cannot rearm another. Once vehicle identity is known,
+automatic and explicit selections of the same car share its latch. Live attempts share
+an account-wide hourly budget, error backoff and overlap guard. After any
+process restart there is a full one-hour live-request cooldown, and no disk cache
+can authorize the first wake: a successful cloud read is required. This conservative
+reset protects the hourly budget without persisting wake authorization. Stale data
+never authorizes a wake. A live response with an unchanged/missing timestamp, an
+API error, or the continuous-active limit latches the session into passive reads.
+New charging reports alone cannot clear that latch; a newer fresh stopped/unplugged
+report must be observed first. A skipped or failed attempt still consumes its reserved
+budget. With the default stale interval, repeated API failures back off for 1, 2, 4,
+then at most 8 hours; a successful read resets that vehicle's failure streak. A
+regressing or contradictory report cannot lower the timestamp baseline or rearm the
+latch. Existing authentication
+cooldowns remain in effect. These controls are local to this process: separate
+mirrors/services cannot coordinate budgets. Keep only one mirror active as usual.
+
+Charging can end between the preflight check and a wake. That race cannot be
+eliminated through Kia's cloud API; a stopped result disables further wakes. A
+continuously advancing but incorrect cloud charging flag remains bounded by the
+90-minute session latch. Repeated cached reports cannot extend authorization.
+
+### What the Kia library actually does
+
+Inspected pinned `hyundai_kia_connect_api` **v4.41.4**, particularly
+[`VehicleManager.py`](https://github.com/Hyundai-Kia-Connect/hyundai_kia_connect_api/blob/v4.41.4/hyundai_kia_connect_api/VehicleManager.py)
+and [`KiaUvoApiUSA.py`](https://github.com/Hyundai-Kia-Connect/hyundai_kia_connect_api/blob/v4.41.4/hyundai_kia_connect_api/KiaUvoApiUSA.py).
+`update_all_vehicles_with_cached_state` reads server-cached status; adaptive mode
+never calls `check_and_force_update_vehicles`, which may force a wake by age.
+`force_refresh_vehicle_state` requests live status but Kia USA then rereads cache;
+success alone is not proof of a new vehicle report. `batteryPlugin` is passed
+through as a raw connector code, with no authoritative enum in that parser. Codes
+1–4 are treated as connected for cadence only; no connector type is inferred
+from the observed EV6 code 2. Boolean/numeric charging true/1 is required separately.
+A passive adaptive cycle reads cached status once; only a permitted live cycle needs
+the additional post-refresh cached read.
+Timezone-free, missing, future or old timestamps fail closed. `syncDate.utc` is the
+library's source for the vehicle report timestamp.
+
+The library's cached path uses Kia cloud endpoints and may also fetch charge targets.
+This means “passive” here promises no explicit forced refresh, not a proven guarantee
+that Kia's servers never contact the car. No local mocked test can establish Kia's
+internal wake behavior. The 12V value is a cloud snapshot, not a real-time voltage
+or an assurance that auxiliary battery health is good. Sleeping vehicles may not
+report charging transitions promptly, so adaptive mode can remain passive throughout
+a real charging session. This is intentional when evidence is insufficient.
+
+### History and diagnostics
+
+Existing ignored `cache/` history remains local. Adaptive history adds report time,
+retrieval time, charging flag and polling mode, and skips duplicate report timestamps;
+existing minimum sample spacing and retention still apply. No telemetry belongs in Git.
+
+Logs distinguish `cached cloud retrieval`, `active vehicle refresh`, `new vehicle
+telemetry`, `repeated cached telemetry`, polling/charging state transitions,
+`restart cooldown`, `hourly live limit`, `continuous active limit`,
+`session safety latch`, and `adaptive API error; passive backoff`. New policy logs
+contain no credentials, VINs, coordinates or raw responses. A new timestamp means
+a new cloud report, not independently verified physical vehicle state.
+
+### Complete ready-to-replace module block
+
+Replace the existing Kia entry in `config.modules` with this complete object. Keep
+credentials only in the Pi's private MagicMirror config; do not commit it. The
+parentheses/semicolon in the example file make it syntax-checkable standalone;
+inside `modules: [...]`, paste the object `{ ... }` itself.
+
+```javascript
+// Copy the complete object below into MagicMirror's config.modules array.
+// Enter credentials ONLY in ~/MagicMirror/config/config.js on each Pi.
+({
+  module: "MMM-KiaAccess",
+  position: "bottom_center",
+  header: "Bluebell",
+  config: {
+    username: "YOUR_KIA_EMAIL",
+    password: "YOUR_KIA_PASSWORD",
+    pin: "",
+    brand: "KIA",
+    region: "USA",
+    adaptivePolling: {
+      enabled: true,
+      chargingInterval: 600000,
+      pluggedInterval: 1800000,
+      idleInterval: 3600000,
+      staleInterval: 3600000,
+      statusMaxAge: 1200000,
+      liveRefreshTimeout: 30,
+      maxLiveRequestsPerHour: 6,
+      maxContinuousActiveMinutes: 90
+    },
+    // Legacy settings apply if adaptive polling is disabled.
+    refresh: false,
+    forceRefreshTimeout: 0,
+    updateInterval: 1800000,
+    units: "imperial",
+    maxWidth: "320px",
+    showTable: false,
+    include: [
+      "vehicle.ev_battery_percentage",
+      "vehicle.ev_driving_range",
+      "vehicle.ev_battery_is_charging",
+      "vehicle.ev_battery_is_plugged_in",
+      "vehicle.car_battery_percentage",
+      "vehicle.is_locked",
+      "vehicle.last_updated_at"
+    ],
+    labels: {
+      "vehicle.ev_driving_range": "Driving Range",
+      "vehicle.car_battery_percentage": "12V Battery"
+    },
+    formatters: {
+      "vehicle.ev_driving_range": "distanceKm",
+      "vehicle.car_battery_percentage": "percent"
+    },
+    showHeaderCount: false,
+    showUpdatedFooter: false,
+    showReportedInHeader: true,
+    notifications: { checks: { serviceDue: false } },
+    visuals: {
+      enabled: true,
+      compact: false,
+      car: true,
+      battery: true,
+      width: 190,
+      batteryDetail: ["vehicle.ev_driving_range", "vehicle.car_battery_percentage"],
+      rangeRing: false,
+      chargeProgress: false,
+      location: { enabled: false, map: false }
+    }
+  }
+});
+```
+
+### Deploy manually on either Raspberry Pi ARM64
+
+No Pi was accessed during development. Run these commands locally on the selected
+Pi after reviewing the feature branch. Node.js 22 is the production baseline;
+Python setup uses the module-managed environment (Python >=3.12 required).
+
+```bash
+node --version
+uname -m
+# Locate installations; select the intended checkout from the output.
+find "$HOME" /opt /srv -type f -path '*/MMM-KiaAccess/package.json' 2>/dev/null
+read -r -p 'Full path to the MMM-KiaAccess directory: ' MODULE
+cd "$MODULE" || exit 1
+git remote -v
+git status --short
+# Stop if there are local changes; preserve them before switching branches.
+git fetch origin
+git switch feature/adaptive-polling
+git pull --ff-only origin feature/adaptive-polling
+npm install
+node setup_python.js
+npm test
+npm run test:python
+# Derive MagicMirror root from the standard modules checkout layout.
+MM_ROOT=$(cd ../.. && pwd)
+test -f "$MM_ROOT/config/config.js" || exit 1
+cp "$MM_ROOT/config/config.js" "$MM_ROOT/config/config.js.backup.$(date +%Y%m%d%H%M%S)"
+nano "$MM_ROOT/config/config.js"
+# Replace the complete Kia block using the example above; enter private credentials.
+node --check "$MM_ROOT/config/config.js"
+```
+
+Restart MagicMirror using its existing process manager. Discover the actual service
+with `pm2 list` or `systemctl --user list-units --type=service`; do not assume a
+service name. Use `pm2 logs <actual-name> --lines 200` or
+`journalctl --user -u <actual-service> -f` as appropriate and filter for
+`MMM-KiaAccess`. A terminal launch prints logs in that terminal. Expect cached reads
+and restart cooldown during the first hour, then active refresh only with fresh
+charging evidence. Compare new/repeated telemetry messages to evaluate reporting
+frequency. Verify stopped/disconnected states produce passive reads. For rollback,
+stop the mirror, switch to `main` in a clean checkout and restore the private config
+backup before restarting. No merge or physical vehicle validation is implied.
+
 ## TL;DR
 
 **Your Kia / Hyundai / Genesis, on Home Assistant and/or MagicMirror², from one
