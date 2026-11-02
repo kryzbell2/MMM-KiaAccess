@@ -13,6 +13,7 @@
 Module.register("MMM-KiaAccess", {
   defaults: {
     // ---- credentials (Kia Connect / Bluelink account) ----
+    credentialProfile: "", // server-only profile name; no credentials in config.js
     username: "",
     password: "",
     pin: "",
@@ -487,6 +488,9 @@ Module.register("MMM-KiaAccess", {
       if (this.config.retryInterval === this.defaults.retryInterval) {
         this.config.retryInterval = 30 * 1000;
       }
+    } else if (this.config.credentialProfile) {
+      if(this.config.username||this.config.password||this.config.pin) configErr="Remove browser credentials when using a server profile";
+      if(this.config.vehicles.length) configErr="Server credential profiles support one selected vehicle";
     } else if (!this.config.username || !this.config.password) {
       configErr = "Set username / password / pin in config.js";
     }
@@ -623,6 +627,7 @@ Module.register("MMM-KiaAccess", {
   // use.
   _fullIdentifier(vin) {
     const c = this.serialisableConfig();
+    if(c.credentialProfile) return "profile:"+c.credentialProfile+"|auto";
     return [c.region, c.brand, c.username, vin || c.vin || "auto"].join("|");
   },
 
@@ -633,6 +638,7 @@ Module.register("MMM-KiaAccess", {
   // back to the account-level id there, matching how that vehicle's own
   // KIA_DATA already addresses it.
   _maybeSendLastParked(vin, lastParked) {
+    if(this.config.credentialProfile) return; // secure mode never accepts client cache writes
     this._sentLastParked = this._sentLastParked || {};
     const key = vin || "";
     const prev = this._sentLastParked[key];
@@ -708,8 +714,9 @@ Module.register("MMM-KiaAccess", {
   },
 
   serialisableConfig() {
-    // only what the helper needs
+    // In server-profile mode the browser sends no account or fetch options.
     const c = this.config;
+    if(c.credentialProfile) return {credentialProfile:c.credentialProfile};
     return {
       username: c.username,
       password: c.password,
@@ -893,6 +900,7 @@ Module.register("MMM-KiaAccess", {
   isForMe(identifier) {
     // node_helper builds the identifier the same way from our serialisable config
     const c = this.serialisableConfig();
+    if(c.credentialProfile) return identifier==="profile:"+c.credentialProfile+"|auto";
     if (c.vehicles && c.vehicles.length) {
       // rotate mode: node_helper reports each configured vehicle under its
       // own real-VIN identifier (see handleFetch()'s per-vehicle subId) --
@@ -1221,7 +1229,7 @@ Module.register("MMM-KiaAccess", {
     // hand any fired events to node_helper for the outbound webhook (it applies
     // the events/levels filter and does the HTTP POST off the main process)
     const hook = cfg.webhook || {};
-    if (hook.enabled && hook.url && fired.length) {
+    if (!this.config.credentialProfile && hook.enabled && hook.url && fired.length) {
       this.sendSocketNotification("KIA_WEBHOOK", {
         // identifies the account this webhook belongs to, so node_helper can
         // pin hook.url to its first-seen value per account (see node_helper's

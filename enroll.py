@@ -146,7 +146,7 @@ def main():
 
         print("Kia needs a one-time code. Where should it be sent?")
         for i, (kind, dest) in enumerate(opts, 1):
-            print(f"  {i}) {kind}  {dest or ''}")
+            print(f"  {i}) {kind} (destination withheld)")
         choice = ask(f"Choose 1-{len(opts)} [1]: ") or "1"
         try:
             kind = opts[int(choice) - 1][0]
@@ -165,7 +165,7 @@ def main():
         print("Login failed — check the username, password and PIN.", file=sys.stderr)
         return 1
     else:
-        print(f"Unexpected login result: {result!r}", file=sys.stderr)
+        print("Unexpected login result; enrollment not saved", file=sys.stderr)
         return 1
 
     if not vm.token:
@@ -176,7 +176,8 @@ def main():
     token_file = job.get("tokenFile") or account_token_file(job)
     # carries forward a pre-v2.63 install's single shared token.json (if any)
     # under this account's own name, exactly as a normal fetch would
-    _migrate_legacy_token(token_file, account_hash)
+    if not job.get("stateDirectory"):
+        _migrate_legacy_token(token_file, account_hash)
 
     tok = vm.token.to_dict()
     tok["enrolled_at"] = __import__("datetime").datetime.now(
@@ -202,10 +203,8 @@ def main():
         pass
     os.replace(tmp, token_file)  # atomic on both POSIX and Windows
 
-    names = ", ".join(sorted(vm.vehicles and (v.name for v in vm.vehicles.values()) or []))
-    print(f"\nSaved {token_file}")
-    if names:
-        print(f"Vehicles: {names}")
+    print("Token saved to the account state file.")
+    print("Vehicles available:", len(vm.vehicles or {}))
     print("You can now start MagicMirror.")
     return 0
 

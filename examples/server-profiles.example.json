@@ -1,0 +1,19 @@
+{
+  "profiles": {
+    "bluebell": {
+      "username": "YOUR_KIA_EMAIL",
+      "password": "YOUR_KIA_PASSWORD",
+      "pin": "",
+      "brand": "KIA",
+      "region": "USA",
+      "refresh": false,
+      "forceRefreshTimeout": 0,
+      "adaptivePolling": { "enabled": false },
+      "maxRequestsPerHour": 12,
+      "maxCloudRequestsPerHour": 60,
+      "historyDays": 60,
+      "historyMinIntervalMinutes": 30,
+      "units": "imperial"
+    }
+  }
+}

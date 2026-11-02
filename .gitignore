@@ -37,3 +37,5 @@ request-budget-*.json*
 server-secrets*.json
 *.pem
 *.key
+
+accounts.local*.json

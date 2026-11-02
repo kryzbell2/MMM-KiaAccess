@@ -39,6 +39,7 @@ const exporter = require("./exporter.js");
 
 const AP = require("./adaptive_polling.js");
 const PG = require("./polling_guard.js");
+const SP = require("./server_profiles.js");
 
 const CACHE_DIR = path.join(__dirname, "cache");
 
@@ -86,6 +87,8 @@ function resolvePython(configured) {
 
 module.exports = NodeHelper.create({
   start() {
+    this.serverProfiles=SP.load(process.env.MMM_KIA_SECRETS_FILE);
+    if(this.serverProfiles.error) Log.error("[MMM-KiaAccess] server credential profiles unavailable; requests disabled");
     this.inFlight = {};
     this.adaptive = {}; // vehicle-scoped evidence, cadence and safety latch
     this.adaptiveAccounts = {}; // account-scoped live budget and overlap guard
@@ -127,7 +130,7 @@ module.exports = NodeHelper.create({
     // rather than reading the module constant directly everywhere below --
     // lets a test point a helper instance at a throwaway temp directory
     // instead of writing into this repo's real cache/ folder.
-    this.cacheDir = CACHE_DIR;
+    this.cacheDir = this.serverProfiles.cacheDir || CACHE_DIR;
     try {
       fs.mkdirSync(this.cacheDir, { recursive: true, mode: 0o700 });
       // mkdirSync's `mode` only applies to a directory it actually creates --
@@ -141,6 +144,22 @@ module.exports = NodeHelper.create({
   },
 
   socketNotificationReceived(notification, payload) {
+    if(this.serverProfiles.configured) {
+      // A configured secure deployment never falls back to browser credentials,
+      // even after a typo, malformed request, or unreadable private file.
+      if(notification!=="KIA_FETCH") return;
+      const config=this.serverProfiles.resolve(payload);
+      if(!config) {
+        const name=payload&&SP.validName(payload.credentialProfile)?payload.credentialProfile:"unavailable";
+        this.sendSocketNotification("KIA_ERROR",{identifier:"profile:"+name+"|auto",error:"server credential profile unavailable",retryAfterMs:3600000});
+        return;
+      }
+      return this.handleFetch(config);
+    }
+    if(payload&&payload.credentialProfile) {
+      this.sendSocketNotification("KIA_ERROR",{identifier:"profile:"+(SP.validName(payload.credentialProfile)?payload.credentialProfile:"unavailable")+"|auto",error:"server credential profiles not configured",retryAfterMs:3600000});
+      return;
+    }
     if (notification === "KIA_FETCH") this.handleFetch(payload);
     else if (notification === "KIA_WEBHOOK") this.handleWebhook(payload);
     else if (notification === "KIA_LAST_PARKED") this.handleLastParked(payload);
@@ -596,6 +615,7 @@ module.exports = NodeHelper.create({
       allVehicles: rotating,
       refresh: adaptive ? decision.live : legacyLive,
       requestProtection: { maxCloudRequestsPerHour: lease.limits.cloud },
+      stateDirectory: this.serverProfiles.configured ? config._stateDirectory : undefined,
       adaptivePolling: adaptive ? apConfig : null,
       wakeVin: adaptive ? config.vin || "" : "",
       geocode: config.geocode === true,
@@ -619,7 +639,7 @@ module.exports = NodeHelper.create({
       this.inFlight[id] = false;
       acct.busy=false; acct.failures++; acct.backoffUntil=Date.now()+300000 * 2**Math.min(acct.failures-1,3);
       try { lease.save(); } catch (_) { Log.error("[MMM-KiaAccess] guard state write failed; passive mode required"); } finally { lease.release(); }
-      return this._reportFailure(id, config, rotating, `could not start ${pythonBin}: ${err.message}`);
+      return this._reportFailure(id, config, rotating, "Kia bridge could not start; passive backoff");
     }
 
     const killTimer = setTimeout(() => child.kill("SIGKILL"), (config.fetchTimeout || 90) * 1000);
@@ -821,7 +841,7 @@ module.exports = NodeHelper.create({
     const apConfig = AP.options(config.adaptivePolling);
     const adaptive = apConfig.enabled === true && config.source !== "homeassistant";
     if (payload._meta.warning) Log.warn("[MMM-KiaAccess] " +
-      (adaptive ? "unverifiable telemetry; passive latch" : payload._meta.warning));
+      "unverifiable vehicle telemetry; passive safeguards apply");
     if (adaptive) {
       const policy = this.adaptivePolicy(id, config, vehicle);
       const oldMode = policy.mode;
@@ -1224,7 +1244,7 @@ module.exports = NodeHelper.create({
         roundTripUrl: smap(pick(roundR))
       };
       this.persist(id);
-      this.sendSocketNotification("KIA_RANGE_MAP", { identifier: id, rangeMap: s.rangeMap });
+      this.sendSocketNotification("KIA_RANGE_MAP", { identifier: SP.identifier(id,config), rangeMap: s.rangeMap });
     } catch (e) {
       Log.warn("[MMM-KiaAccess] range map: " + e.message);
     } finally {
@@ -1332,8 +1352,8 @@ module.exports = NodeHelper.create({
     const s = this.st(id);
     if (!s.lastGood) {
       this.sendSocketNotification("KIA_ERROR", {
-        identifier: id,
-        error: opts.error || opts.note || "no data yet",
+        identifier: SP.identifier(id,config),
+        error: config._credentialProfile ? "server request unavailable; see policy logs" : opts.error || opts.note || "no data yet",
         failStreak: s.failStreak || 0,
         retryAfterMs: opts.retryAfterMs
       });
@@ -1382,7 +1402,7 @@ module.exports = NodeHelper.create({
     if (s.analytics === undefined) s.analytics = buildAnalytics(s, config);
     payload.analytics = s.analytics;
     // note: `config` (credentials / token) is deliberately NOT echoed back
-    this.sendSocketNotification("KIA_DATA", { identifier: id, payload });
+    this.sendSocketNotification("KIA_DATA", { identifier: SP.identifier(id,config), payload:config._credentialProfile?SP.toBrowser(payload,config):payload });
   },
 
   // ---- optional MQTT state publisher ----
