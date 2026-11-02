@@ -33,7 +33,7 @@ jobs:
         run: npm install
       - name: Syntax check
         run: |
-          for f in server_profiles.js polling_guard.js adaptive_polling.js MMM-KiaAccess.js node_helper.js webhook.js exporter.js core/flatten.js core/visuals.js core/conditions.js core/state.js core/ha-discovery.js core/sessions.js core/range.js core/routing.js core/isoline.js core/trips.js core/dest-planner.js core/analytics.js ha_source.js setup_python.js docs/build-gallery.js scripts/sync-core.js card/kia-access-card.src.js card/kia-range-map-card.src.js custom_components/kia_access/frontend/kia-access-card.js; do
+          for f in server_profiles.js polling_guard.js adaptive_polling.js MMM-KiaAccess.js node_helper.js webhook.js exporter.js core/flatten.js core/visuals.js core/conditions.js core/state.js core/status.js core/ha-discovery.js core/sessions.js core/range.js core/routing.js core/isoline.js core/trips.js core/dest-planner.js core/analytics.js ha_source.js setup_python.js docs/build-gallery.js scripts/sync-core.js card/kia-access-card.src.js card/kia-range-map-card.src.js custom_components/kia_access/frontend/kia-access-card.js; do
             echo "node --check $f"
             node --check "$f"
           done
@@ -76,6 +76,7 @@ jobs:
         run: python test/contract_test.py
       - name: Adaptive polling bridge safeguards (mock API)
         run: |
+          python test/bridge_status_test.py
           python test/adaptive_polling_test.py
           python test/cloud_budget_test.py
           python test/server_enrollment_test.py

@@ -34,6 +34,7 @@ function loadMMModule() {
   const filePath = path.join(__dirname, "..", "MMM-KiaAccess.js");
   const src = fs.readFileSync(filePath, "utf8");
 
+  global.KiaAccessStatus = require("../core/status.js");
   let captured = null;
   global.Module = {
     register(_name, spec) {

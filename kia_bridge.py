@@ -34,11 +34,35 @@ import cloud_budget
 import kia_client
 
 
+def failure_kind(error):
+    """Public classification only; never return exception text or response data."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        names = {cls.__name__.lower() for cls in type(error).__mro__}
+        if isinstance(error, cloud_budget.BudgetExceeded):
+            return "rate_limit" if "hourly limit" in str(error) else "processing"
+        if any("authentication" in name or "otp" in name or name == "pinmissingerror" for name in names):
+            return "authentication"
+        if any("timeout" in name or "connection" in name for name in names):
+            return "network"
+        if isinstance(error, kia_client.ClientError):
+            text = str(error)
+            if text.startswith("cooling down after "):
+                return "authentication"
+            if text.startswith("live wake-up timed out"):
+                return "network"
+        if isinstance(error, (ValueError, TypeError)):
+            return "processing"
+        error = error.__cause__ or error.__context__
+    return "api"
+
+
 def main():
     try:
         job = json.load(sys.stdin)
     except Exception as exc:  # noqa: BLE001
-        print(json.dumps({"ok": False, "error": f"bad job payload: {exc}"}))
+        print(json.dumps({"ok": False, "error": "bad job payload", "errorKind": "processing"}))
         return 0
 
     try:
@@ -61,14 +85,14 @@ def main():
             if isinstance(result.get("meta"), dict):
                 result["meta"].pop("token", None)
         print(json.dumps(result))
-    except cloud_budget.BudgetExceeded:
-        print(json.dumps({"ok": False, "error": "cloud request limit or guard unavailable; passive backoff"}))
+    except cloud_budget.BudgetExceeded as exc:
+        print(json.dumps({"ok": False, "error": "cloud request limit or guard unavailable; passive backoff", "errorKind": failure_kind(exc)}))
     except kia_client.OtpRequired as exc:
-        print(json.dumps({"ok": False, "error": "Kia enrollment required; use the local enrollment workflow"}))
+        print(json.dumps({"ok": False, "error": "Kia enrollment required; use the local enrollment workflow", "errorKind": "authentication"}))
     except kia_client.ClientError as exc:
-        print(json.dumps({"ok": False, "error": "Kia request failed; passive backoff"}))
+        print(json.dumps({"ok": False, "error": "Kia request failed; passive backoff", "errorKind": failure_kind(exc)}))
     except Exception as exc:  # noqa: BLE001
-        print(json.dumps({"ok": False, "error": f"Kia request failed ({type(exc).__name__}); passive backoff"}))
+        print(json.dumps({"ok": False, "error": "Kia request failed; passive backoff", "errorKind": failure_kind(exc)}))
     return 0
 
 

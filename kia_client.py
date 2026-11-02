@@ -886,7 +886,7 @@ def fetch(job, token_file=None):
         )
     vehicles = [dump_vehicle(v, job.get("region", "USA")) for v in selected]
 
-    meta = {}
+    meta = {"retrievalSource": "live" if job.get("refresh", True) and timeout > 0 else "cached_cloud"}
     if adaptive:
         meta["adaptiveLive"] = adaptive_live
     if meta_note:
