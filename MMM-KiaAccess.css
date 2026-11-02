@@ -206,3 +206,8 @@
   margin-top: 4px;
   text-align: right;
 }
+
+/* Request failures are restrained; historical observations stay neutral. */
+.kiaaccess-statusnote { margin: 4px 0 8px; line-height: 1.4; }
+.kiaaccess-statusnote.is-historical { color: #aaa; }
+.kiaaccess-statusnote.is-error { color: #e5b76b; }

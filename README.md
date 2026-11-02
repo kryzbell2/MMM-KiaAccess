@@ -3,21 +3,71 @@
 ## Blue Beauty EV6 installation
 
 For this fork's Blue Beauty dashboard, use the [install/reinstall guide](docs/BLUEBELL.md)
-and [complete credential-free configuration example](examples/bluebell.config.example.js).
-Enter credentials only on your Pi and enroll each installation independently.
+and [complete server-profile configuration example](examples/bluebell.server.config.example.js).
+Keep credentials in the private server profile and enroll each installation independently.
 This fork preserves the upstream project below; Pi updates are performed manually.
 
 [![CI](https://github.com/Legal-Copy7045/MMM-KiaAccess/actions/workflows/ci.yml/badge.svg)](https://github.com/Legal-Copy7045/MMM-KiaAccess/actions/workflows/ci.yml)
 
-## Server-only credentials (separate security change)
+## Server-only credentials
 
 Use [server credential profiles](docs/SERVER_CREDENTIALS.md) to keep Kia secrets
-outside browser-served config.js. This is an explicit future migration; no working
-authentication or production configuration is automatically changed. The complete
+outside browser-served config.js. No production configuration is automatically changed. The complete
 [public Blue Beauty block](examples/bluebell.server.config.example.js) contains only a
 profile name and presentation/cached-only settings. Node reads the private account
 file from its own environment and rejects browser backend-option overrides.
 Legacy config.js credentials remain exposed until removed from that configuration.
+
+## Status and freshness (MagicMirror)
+
+| State | Meaning | Display |
+| --- | --- | --- |
+| Normal | Successful retrieval with a recent vehicle report | Actual vehicle reporting time in the header |
+| Cached | Routine cooldown/interval/budget wait, repeated report, or report over 20 minutes old | Neutral `CACHED` header label; no error banner |
+| Stale | Report older than `displayStaleAfter`, or missing, invalid, timezone-free or future reporting time | `STALE` label and historical-readings note |
+| Error | Authentication, connection, API or processing failure | Restrained fixed warning; last valid readings retained |
+
+Example: `BLUE BEAUTY - AS OF: 22:42 · CACHED`. The reporting timestamp is always
+the vehicle's `last_updated_at`, never the time cached values were served. Hover
+over the module for the vehicle report, last successful Kia retrieval, request
+source and next permitted request time when known. The optional
+`showUpdatedFooter` now says `retrieved …`; the supplied dashboard keeps it off.
+A new cloud retrieval does not prove the vehicle sent a new report. An unchanged
+report is cached even when the HTTP retrieval succeeded.
+
+`displayStaleAfter` defaults to **3600000 ms (one hour)**, appropriate for the
+30-minute cached cadence. It accepts a positive number of milliseconds (minimum
+one minute); invalid values use the default. It changes presentation only, never
+polling, wake eligibility or safety budgets. Independently, reports older than
+**20 minutes**, or older than a shorter configured display threshold, are
+historical for security and charging. Old lock/charging indicators become unknown;
+a neutral `Last reported: unlocked · charging. Not verified current.` note
+preserves their meaning. Fresh security alerts remain prominent. Invalid timestamps
+never imply fresh security status. A local display clock ages readings between
+polls without scheduling a Kia retrieval.
+
+Errors take precedence over freshness labels; historical notes still appear when
+an error accompanies old data. Routine deferrals do not erase an outstanding
+API/authentication failure; successful retrieval clears it. Browser warnings use
+fixed text from classified status codes, not raw exceptions, credentials or
+redacted server messages. Older caches without typed status are handled
+conservatively until successful retrieval. Successful Kia retrieval timestamps are
+persisted even for unchanged reports; HA stream persistence is unchanged.
+
+Server diagnostics distinguish cached success, unchanged reports, newly received
+fresh telemetry, new historical reports, minimum interval, API backoff, guard
+cooldown, hourly limits, overlap skips, authentication and other failures.
+Deferrals use info level; actual failures use warning level. Repeated identical
+events for an account are suppressed for five minutes. Next permitted request
+times describe the guard's earliest allowance, not a guarantee that a scheduled
+poll will succeed. Messages omit identities, raw exceptions, tokens and coordinates.
+
+No configuration migration is required. For a complete optional replacement,
+use the [paste-ready Blue Beauty server-profile object](examples/bluebell.server.config.example.js):
+12V battery retained, map off, adaptive off, refresh off, 30-minute cached polling.
+The optional `displayStaleAfter` entry can be omitted for the same default.
+See [adaptive startup feasibility](docs/ADAPTIVE_STARTUP_REVIEW.md) for the separate
+investigation; no additional wake permission is implemented.
 
 ## Safe Kia polling (MagicMirror)
 
@@ -202,6 +252,7 @@ upgrade; the separate security change provides a server-only alternative.
     showHeaderCount: false,
     showUpdatedFooter: false,
     showReportedInHeader: true,
+    displayStaleAfter: 3600000, // display only; security historical after 20 minutes
     notifications: { checks: { serviceDue: false } },
     visuals: {
       enabled: true,
@@ -1023,6 +1074,7 @@ depends on its brand, region and powertrain):
 | `mqtt.enabled` | `false` | publish full state to retained MQTT topics — see [MQTT](#mqtt-state-publishing) |
 | `showHeaderCount` | `true` | append attribute count to the header |
 | `showUpdatedFooter` | `true` | show "updated HH:MM:SS" footer (when *we* last fetched) |
+| `displayStaleAfter` | `3600000` | Historical-display threshold in ms (minimum 60000). Security/charging become historical after at most 20 minutes. Does not change polling or wake limits. |
 | `showReportedInHeader` | `false` | append `" - as of: <time>"` to the header from `vehicle.last_updated_at` (when the *car* last reported) and drop that row from the table. Shows `14:32` for today, `Sep 7 14:32` otherwise |
 | `showTable` | `true` | `false` drops the details table entirely — the diagram + widgets carry the state. `visuals.batteryDetail` (Range, charge times…) still renders under the car |
 | `maxWidth` | `"420px"` | CSS max-width |

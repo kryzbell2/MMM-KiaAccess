@@ -39,6 +39,7 @@ const exporter = require("./exporter.js");
 
 const AP = require("./adaptive_polling.js");
 const PG = require("./polling_guard.js");
+const Status = require("./core/status.js");
 const SP = require("./server_profiles.js");
 
 const CACHE_DIR = path.join(__dirname, "cache");
@@ -89,6 +90,7 @@ module.exports = NodeHelper.create({
   start() {
     this.serverProfiles=SP.load(process.env.MMM_KIA_SECRETS_FILE);
     if(this.serverProfiles.error) Log.error("[MMM-KiaAccess] server credential profiles unavailable; requests disabled");
+    this.diagnosticEvents = new Map();
     this.inFlight = {};
     this.adaptive = {}; // vehicle-scoped evidence, cadence and safety latch
     this.adaptiveAccounts = {}; // account-scoped live budget and overlap guard
@@ -459,6 +461,15 @@ module.exports = NodeHelper.create({
     return this.adaptive[id] || (this.adaptive[id] = new AP.Poller(Date.now(), account));
   },
 
+  diagnostic(config,event,level="info",nextAt) {
+    const key=this.acctKeyFor(config)+"|"+event;
+    const now=Date.now(),previous=this.diagnosticEvents.get(key);
+    if(previous!=null&&now-previous<300000) return;
+    this.diagnosticEvents.set(key,now);
+    const next=Number.isFinite(nextAt)&&nextAt>now?"; next permitted request "+new Date(nextAt).toISOString():"";
+    Log[level]("[MMM-KiaAccess] "+event+next);
+  },
+
   handleFetch(config) {
     const id = this.identifierFor(config);
     const s = this.st(id);
@@ -488,7 +499,7 @@ module.exports = NodeHelper.create({
     this._retireRemovedFromConfig(id, config);
 
     if (this.inFlight[id]) {
-      Log.info("[MMM-KiaAccess] fetch already in progress, skipping");
+      this.diagnostic(config,"request skipped: another fetch is in progress");
       return;
     }
 
@@ -562,9 +573,13 @@ module.exports = NodeHelper.create({
       policy = this.adaptivePolicy(id, config);
 
       const due = Math.max(policy.due, policy.account.backoffUntil);
-      if (Date.now() < due) return this._reportServe(id, config, rotating, {
-        retryAfterMs: due - Date.now(), note: "adaptive polling wait"
-      });
+      if (Date.now() < due) {
+        const backoff=policy.account.backoffUntil>Date.now()&&policy.account.failures>0;
+        this.diagnostic(config,backoff?"request deferred: API backoff":"request deferred: adaptive interval","info",due);
+        return this._reportServe(id, config, rotating, {
+          retryAfterMs: due - Date.now(), reasonCode:backoff?"api_backoff":"adaptive_wait", kind:policy.account.lastFailureKind,failureActive:policy.account.failures>0
+        });
+      }
     }
 
     // All Kia modes share the same persisted guard, including legacy cached
@@ -574,8 +589,8 @@ module.exports = NodeHelper.create({
     this.acctState[acctKey] = acct;
     const lease = PG.acquire(this.cacheDir, acctKey, acct, config);
     if (!lease.allowed) {
-      Log.info("[MMM-KiaAccess] " + lease.reason);
-      return this._reportServe(id, config, rotating, {retryAfterMs:lease.delay,note:lease.reason});
+      this.diagnostic(config,"request deferred: "+lease.reason,"info",Date.now()+lease.delay);
+      return this._reportServe(id, config, rotating, {retryAfterMs:lease.delay,reasonCode:lease.reasonCode,failureActive:lease.failureActive,kind:lease.reasonCode==="guard_unavailable"?"processing":lease.lastFailureKind,error:lease.reasonCode==="guard_unavailable"?"guard unavailable":undefined});
     }
     let legacyLive = config.refresh === true;
     if (policy) {
@@ -637,12 +652,13 @@ module.exports = NodeHelper.create({
       child = spawn(pythonBin, [script], { stdio: ["pipe", "pipe", "pipe"] });
     } catch (err) {
       this.inFlight[id] = false;
-      acct.busy=false; acct.failures++; acct.backoffUntil=Date.now()+300000 * 2**Math.min(acct.failures-1,3);
+      acct.busy=false; acct.failures++; acct.lastFailureKind="processing"; acct.backoffUntil=Date.now()+300000 * 2**Math.min(acct.failures-1,3);
       try { lease.save(); } catch (_) { Log.error("[MMM-KiaAccess] guard state write failed; passive mode required"); } finally { lease.release(); }
-      return this._reportFailure(id, config, rotating, "Kia bridge could not start; passive backoff");
+      return this._reportFailure(id, config, rotating, "Kia bridge could not start; passive backoff","processing");
     }
 
-    const killTimer = setTimeout(() => child.kill("SIGKILL"), (config.fetchTimeout || 90) * 1000);
+    let timedOut=false;
+    const killTimer = setTimeout(() => { timedOut=true; child.kill("SIGKILL"); }, (config.fetchTimeout || 90) * 1000);
 
     // A spawn-level failure (bad executable, no exec permission, OS-level
     // error) fires BOTH "error" and a subsequent "close" -- two separate
@@ -651,14 +667,14 @@ module.exports = NodeHelper.create({
     // failStreak double-increments (skewing the exponential backoff) and
     // the frontend gets the same error twice.
     let settled = false;
-    const reportOnce = (message) => {
+    const reportOnce = (message,kind=timedOut?"network":"processing") => {
       if (settled) return;
       settled = true;
       if (policy) policy.fail(apConfig, Date.now());
-      acct.busy=false; acct.failures++;
+      acct.busy=false; acct.failures++; acct.lastFailureKind=Status.kind(kind);
       acct.backoffUntil=Math.max(acct.backoffUntil,Date.now()+300000*2**Math.min(acct.failures-1,3));
       try { lease.save(); } catch (_) { Log.error("[MMM-KiaAccess] guard state write failed; passive mode required"); } finally { lease.release(); }
-      this._reportFailure(id, config, rotating, "Kia API error; passive backoff");
+      this._reportFailure(id, config, rotating, "Kia API error; passive backoff",Status.kind(kind));
     };
 
     child.on("error", (err) => {
@@ -676,7 +692,7 @@ module.exports = NodeHelper.create({
       acct.busy=false;
       try {
         this._handleBridgeClose(id, config, rotating, code, stdout, stderr, reportOnce);
-        if (!settled) { acct.failures=0; lease.save(); }
+        if (!settled) { acct.failures=0; acct.lastFailureKind=null; lease.save(); }
       } catch (_) { reportOnce("invalid bridge response"); }
       finally { lease.release(); }
     });
@@ -715,7 +731,7 @@ module.exports = NodeHelper.create({
     // change between polls. So outside rotate mode, result.vehicles is
     // guaranteed to have exactly one entry by the time we reach this line.
     if (!result.ok) {
-      return reportOnce(result.error || "unknown bridge error");
+      return reportOnce("Kia request failed",Status.kind(result.errorKind));
     }
     if (!Array.isArray(result.vehicles) || !result.vehicles.length) {
       return reportOnce("bridge returned no vehicles");
@@ -840,19 +856,25 @@ module.exports = NodeHelper.create({
     payload._meta = Object.assign({ fetchedAt: new Date().toISOString(), failStreak: 0 }, payload._meta || {});
     const apConfig = AP.options(config.adaptivePolling);
     const adaptive = apConfig.enabled === true && config.source !== "homeassistant";
+    const previousReportTime=Status.timestamp(s.lastGood&&s.lastGood.vehicle&&s.lastGood.vehicle.last_updated_at);
+    const reportTime=Status.timestamp(vehicle.last_updated_at);
+    payload._meta.requestStatus={state:"success"};
+    payload._meta.telemetry=Number.isFinite(reportTime)&&reportTime<=Date.now()?
+      (Number.isFinite(previousReportTime)&&reportTime===previousReportTime?"unchanged":Number.isFinite(previousReportTime)&&reportTime<previousReportTime?"unverifiable":"new"):"unverifiable";
+    delete payload._meta.error;
+    payload._meta.stale=false;
+    this.diagnostic(config,(payload._meta.retrievalSource==="live"?"live refresh":"cached retrieval")+" succeeded; "+
+      (payload._meta.telemetry==="new"?(Date.now()-reportTime<=Status.SECURITY_MAX_AGE?"fresh vehicle telemetry received":"new historical vehicle report received"):payload._meta.telemetry==="unchanged"?"vehicle telemetry unchanged":"vehicle reporting time unverified"));
     if (payload._meta.warning) Log.warn("[MMM-KiaAccess] " +
       "unverifiable vehicle telemetry; passive safeguards apply");
     if (adaptive) {
       const policy = this.adaptivePolicy(id, config, vehicle);
       const oldMode = policy.mode;
-      const repeated = AP.timestamp(vehicle) === AP.timestamp(policy.last);
-      Log.info("[MMM-KiaAccess] " + (payload._meta.adaptiveLive ? "active vehicle refresh result" : "cached cloud retrieval result"));
       const delay = policy.observe(vehicle, apConfig, Date.now(), payload._meta.adaptiveLive === true, !!(payload._meta.note || payload._meta.warning));
       policy.due = Date.now() + delay;
       payload._meta.retryAfterMs = delay;
       payload._meta.pollingMode = policy.mode;
-      Log.info("[MMM-KiaAccess] " + (repeated ? "repeated cached telemetry" : "new vehicle telemetry") +
-        (oldMode !== policy.mode ? "; polling/charging state " + oldMode + " -> " + policy.mode : ""));
+      if(oldMode!==policy.mode)this.diagnostic(config,"polling/charging state "+oldMode+" -> "+policy.mode);
     }
 
     // did the vehicle data actually move since last poll? (mode C polls often)
@@ -1015,6 +1037,8 @@ module.exports = NodeHelper.create({
     if (tripChanged || sessChanged) s.analytics = buildAnalytics(s, config);
 
     s.failStreak = 0;
+    const retrievalChanged=config.source!=="homeassistant" &&
+      (!s.lastGood || (s.lastGood._meta||{}).fetchedAt!==payload._meta.fetchedAt);
     s.lastGood = payload;
     // rangeReach (HA's driving-times data, mode C) must be folded into s
     // BEFORE the persist decision below, not inside emitData() (which used
@@ -1029,9 +1053,9 @@ module.exports = NodeHelper.create({
     const rangeReachChanged = !!payload.rangeReach &&
       JSON.stringify(payload.rangeReach) !== JSON.stringify(s.rangeReach);
     if (payload.rangeReach) s.rangeReach = payload.rangeReach;
-    // only touch the disk cache when something changed — avoids an SD-card
-    // write every poll when nothing moved
-    if (dataChanged || histChanged || sessChanged || rangeReachChanged) this.persist(id);
+    // Persist successful Kia retrieval time even for unchanged reports, so a
+    // restart retains the latest retrieval time. HA streaming remains change-only.
+    if (dataChanged || histChanged || sessChanged || rangeReachChanged || retrievalChanged) this.persist(id);
 
     this.emitData(id, config, payload);
     this.publishMqtt(config, payload);
@@ -1256,11 +1280,12 @@ module.exports = NodeHelper.create({
     }
   },
 
-  fail(id, config, message) {
+  fail(id, config, message, kind="api") {
     const s = this.st(id);
     s.failStreak = (s.failStreak || 0) + 1;
-    Log.error(`[MMM-KiaAccess] fetch failed (streak ${s.failStreak}): ${message}`);
-    this.serve(id, config, { stale: true, error: message });
+    const account=this.adaptiveAccounts[this.acctKeyFor(config)];
+    this.diagnostic(config,kind==="authentication"?"authentication failure; passive backoff":kind==="rate_limit"?"request deferred: rate protection":"actual "+Status.kind(kind)+" failure; passive backoff",kind==="rate_limit"?"info":"warn",account&&Math.max(account.backoffUntil,account.nextAt));
+    this.serve(id, config, { error:Status.failureText(kind),kind:Status.kind(kind) });
   },
 
   // A whole-account fetch that fails before any vehicle-specific data comes
@@ -1277,9 +1302,9 @@ module.exports = NodeHelper.create({
   // instead, so every one gets its own (correctly failStreak-tracked, cache-
   // backed) failure report, same as if each had its own dedicated module
   // instance that individually failed to fetch.
-  _reportFailure(id, config, rotating, message) {
-    if (!rotating) return this.fail(id, config, message);
-    this._eachConfiguredVehicle(config, (vid) => this.fail(vid, config, message));
+  _reportFailure(id, config, rotating, message, kind="api") {
+    if (!rotating) return this.fail(id, config, message,kind);
+    this._eachConfiguredVehicle(config, (vid) => this.fail(vid, config, message,kind));
   },
 
   // Same idea as _reportFailure(), for a non-error "serve what we have"
@@ -1350,10 +1375,13 @@ module.exports = NodeHelper.create({
   /** send data — from cache when `opts` is given (stale / error / rate-limit), else assumed live */
   serve(id, config, opts) {
     const s = this.st(id);
+    const requestStatus={failureActive:opts.failureActive===true,state:opts.error&&opts.kind!=="rate_limit"?"error":"deferred",reason:Status.reason(opts.reasonCode),kind:Status.kind(opts.kind)};
+    if(opts.retryAfterMs)requestStatus.nextRequestAt=new Date(Date.now()+opts.retryAfterMs).toISOString();
     if (!s.lastGood) {
       this.sendSocketNotification("KIA_ERROR", {
         identifier: SP.identifier(id,config),
-        error: config._credentialProfile ? "server request unavailable; see policy logs" : opts.error || opts.note || "no data yet",
+        error:opts.error?Status.failureText(opts.kind):"Waiting for the next permitted retrieval",
+        requestStatus,
         failStreak: s.failStreak || 0,
         retryAfterMs: opts.retryAfterMs
       });
@@ -1365,8 +1393,9 @@ module.exports = NodeHelper.create({
       cachedAt: payload._meta.fetchedAt,
       failStreak: s.failStreak || 0
     });
-    if (opts.error) payload._meta.error = opts.error;
-    if (opts.note) payload._meta.note = opts.note;
+    delete payload._meta.error;
+    delete payload._meta.note;
+    payload._meta.requestStatus=requestStatus;
     if (opts.retryAfterMs) payload._meta.retryAfterMs = opts.retryAfterMs;
     this.emitData(id, config, payload);
   },

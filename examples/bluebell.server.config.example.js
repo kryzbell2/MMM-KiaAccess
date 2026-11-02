@@ -48,6 +48,7 @@
     showHeaderCount: false,
     showUpdatedFooter: false,
     showReportedInHeader: true,
+    displayStaleAfter: 3600000, // display only; security is historical after 20 minutes
     notifications: { checks: { serviceDue: false } },
     visuals: {
       enabled: true,

@@ -183,7 +183,7 @@ const { freshHelper, tmpCacheDir } = require("./fresh-node-helper.js");
       acctId, config, true, 0,
       JSON.stringify({ ok: false, error: "auth failed" }), "", (m) => reports.push(m)
     );
-    assert.deepStrictEqual(reports, ["auth failed"]);
+    assert.deepStrictEqual(reports, ["Kia request failed"]);
     assert.strictEqual(onPayloadCalls.length, 0);
   }
 

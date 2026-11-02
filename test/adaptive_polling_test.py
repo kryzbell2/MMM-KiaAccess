@@ -37,6 +37,7 @@ class AdaptiveBridgeTests(unittest.TestCase):
         result = self.fetch()
         self.vm.force_refresh_vehicle_state.assert_called_once_with('mock-car')
         self.assertTrue(result['meta']['adaptiveLive'])
+        self.assertEqual(result['meta']['retrievalSource'], 'live')
         self.assertNotIn('note', result['meta'])
         self.assertEqual(self.cached.call_count, 2)
 
@@ -55,7 +56,9 @@ class AdaptiveBridgeTests(unittest.TestCase):
                 self.vehicle.ev_battery_is_charging = charge
                 self.vehicle.ev_battery_is_plugged_in = plug
                 self.vehicle.last_updated_at = stamp
-                self.assertFalse(self.fetch()['meta']['adaptiveLive'])
+                result = self.fetch()
+                self.assertFalse(result['meta']['adaptiveLive'])
+                self.assertEqual(result['meta']['retrievalSource'], 'cached_cloud')
         self.vm.force_refresh_vehicle_state.assert_not_called()
 
     def test_preflight_checks_current_cache_before_waking(self):
@@ -65,7 +68,8 @@ class AdaptiveBridgeTests(unittest.TestCase):
         self.vm.force_refresh_vehicle_state.assert_not_called()
 
     def test_cache_only_fetch_reads_cache_once(self):
-        self.fetch(refresh=False)
+        result = self.fetch(refresh=False)
+        self.assertEqual(result['meta']['retrievalSource'], 'cached_cloud')
         self.cached.assert_called_once()
 
     def test_zero_live_timeout_never_wakes(self):

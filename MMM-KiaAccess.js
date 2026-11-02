@@ -104,6 +104,7 @@ Module.register("MMM-KiaAccess", {
 
     showHeaderCount: true,
     showUpdatedFooter: true,
+    displayStaleAfter: 3600000, // presentation only; older vehicle reports are STALE
     showReportedInHeader: false, // append " - as of: <time>" (vehicle.last_updated_at)
                                 //   to the header and drop that row from the table
     showTable: true, // false = drop the details table entirely (the diagram +
@@ -363,6 +364,7 @@ Module.register("MMM-KiaAccess", {
       this.file("core/visuals.js"),
       this.file("core/conditions.js"),
       this.file("core/state.js"),
+      this.file("core/status.js"),
       this.file("core/sessions.js"),
       this.file("core/range.js"),
       this.file("core/trips.js"), // needs sessions.js + range.js loaded first
@@ -393,6 +395,8 @@ Module.register("MMM-KiaAccess", {
     this.utils = typeof KiaAccessUtils !== "undefined" ? KiaAccessUtils : null;
     this.visuals = typeof KiaAccessVisuals !== "undefined" ? KiaAccessVisuals : null;
     this.conditions = typeof KiaConditions !== "undefined" ? KiaConditions : null;
+    this.statusLib = typeof KiaAccessStatus !== "undefined" ? KiaAccessStatus : null;
+    this._requestStatusOverride = null;
     this.stateBuilder = typeof KiaAccessState !== "undefined" ? KiaAccessState : null;
     this.sessionLib = typeof KiaAccessSessions !== "undefined" ? KiaAccessSessions : null;
     this.tripLib = typeof KiaAccessTrips !== "undefined" ? KiaAccessTrips : null;
@@ -679,13 +683,8 @@ Module.register("MMM-KiaAccess", {
     this.analytics = (cached && cached.analytics) || null;
     // ...and its own freshness: the stale strip and "updated" time belong
     // to the car on screen, set the same way the KIA_DATA handler does
-    const m = (cached && cached._meta) || {};
-    this.stale = !!m.stale;
-    this.staleNote = m.note || null;
-    this.lastUpdated = cached
-      ? new Date(m.stale ? m.cachedAt || m.fetchedAt : m.fetchedAt || Date.now())
-      : null;
-    this.errorMessage = (vin && this.vehicleErrors[vin]) || null;
+    this._requestStatusOverride = (vin && this.vehicleErrors[vin]) || null;
+    this.syncDisplayStatus();
     this.liveChargeTimer();
     this.rebuildView();
     this._loadCondState(vin);
@@ -828,6 +827,7 @@ Module.register("MMM-KiaAccess", {
         return;
       }
       this.rawPayload = data.payload;
+      this.waitingForData = false;
       this.history = data.payload.history || [];
       this.sessions = data.payload.sessions || [];
       this.openSession = data.payload.openSession || null;
@@ -845,15 +845,14 @@ Module.register("MMM-KiaAccess", {
       this.rangeMap = data.payload.rangeMap || null;
       this.rangeReach = data.payload.rangeReach || null;
       this.liveChargeTimer(); // start/stop the "cost this charge" refresh
-      this.stale = !!m.stale;
-      this.staleNote = m.note || null;
-      this.errorMessage = m.error || null; // shown as a strip; data still renders
-      this.lastUpdated = new Date(m.stale ? m.cachedAt || m.fetchedAt : m.fetchedAt || Date.now());
+      this._requestStatusOverride = null;
+      this.syncDisplayStatus();
 
       // with a short poll interval (mode C) most fetches return identical data —
       // only rebuild / re-render / re-check conditions when something changed
       const sig = JSON.stringify(data.payload.vehicle || {}) +
-        "|" + this.stale + "|" + (this.errorMessage || "") + "|" + (this.staleNote || "") +
+        "|" + this.displayStatus().state + "|" + this.displayStatus().historical + "|" + (this.errorMessage || "") +
+        "|" + (m.fetchedAt || "") +
         "|" + (((this.config.visuals || {}).drivingTimes || {}).enabled
           ? JSON.stringify((data.payload.rangeReach || {}).pois || []) +
             "|" + ((data.payload.rangeReach || {}).mmZones || "") : "");
@@ -867,14 +866,16 @@ Module.register("MMM-KiaAccess", {
       }
       this.scheduleFetch(this.nextDelay(m.failStreak || 0, m.retryAfterMs));
     } else if (notification === "KIA_ERROR") {
-      if (rotating && vin) this.vehicleErrors[vin] = data.error || "Unknown error";
+      const requestStatus = data.requestStatus || {state:"error",kind:"api"};
+      if (rotating && vin) this.vehicleErrors[vin] = requestStatus;
       if (!isActive) {
         this.scheduleFetch(this.nextDelay(data.failStreak || 1, data.retryAfterMs));
         return;
       }
       this.loading = false;
-      this.errorMessage = data.error || "Unknown error";
-      Log.error("[MMM-KiaAccess] " + this.errorMessage);
+      this._requestStatusOverride = requestStatus;
+      this.waitingForData = requestStatus.state === "deferred";
+      this.syncDisplayStatus();
       this.updateDom(this.config.animationSpeed);
       this.scheduleFetch(this.nextDelay(data.failStreak || 1, data.retryAfterMs));
     } else if (notification === "KIA_RANGE_MAP") {
@@ -961,16 +962,28 @@ Module.register("MMM-KiaAccess", {
     this.viewData = this.applyCombine(entries);
   },
 
+  displayStatus() {
+    const lib=this.statusLib || (typeof KiaAccessStatus!=="undefined"?KiaAccessStatus:null);
+    if(!lib)return {state:"stale",label:"STALE",stale:true,historical:true,warning:"",historyText:"Reporting status unavailable",tooltip:"Reporting status unavailable",reportTime:null,retrievedTime:null};
+    let payload=this.rawPayload;
+    if(this._requestStatusOverride) payload={...(payload||{}),_meta:{...((payload||{})._meta||{}),requestStatus:this._requestStatusOverride}};
+    return lib.evaluate(payload,this.config.displayStaleAfter);
+  },
+
+  syncDisplayStatus() {
+    const status=this.displayStatus();
+    this.stale=!!this.rawPayload && status.stale;
+    this.staleNote=null;
+    this.errorMessage=status.warning||null;
+    this.lastUpdated=status.retrievedTime==null?null:new Date(status.retrievedTime);
+  },
+
   // vehicle.last_updated_at as a short "as of" string for the header:
   // "14:32" today, "Sep 7 14:32" otherwise, null if missing / unparseable
   reportedAt() {
-    const raw = (this.flatMap || {})["vehicle.last_updated_at"];
-    if (raw == null || raw === "") return null;
-    let d;
-    const m = String(raw).match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/);
-    if (m) d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
-    else d = new Date(raw);
-    if (isNaN(d.getTime())) return null;
+    const report=this.displayStatus().reportTime;
+    if(report==null) return null;
+    const d=new Date(report);
     // follow the mirror's global 12/24h setting when it's reachable
     const h12 =
       typeof config !== "undefined" && config && config.timeFormat === 12;
@@ -1043,7 +1056,8 @@ Module.register("MMM-KiaAccess", {
   // and processConditions() ask for it many times per cycle.
   visualState() {
     if (!this.stateBuilder) return {}; // core/state.js failed to load
-    if (this._stateCache && this._stateCacheKey === this.flatMap) {
+    const historical=this.displayStatus().historical;
+    if (this._stateCache && this._stateCacheKey === this.flatMap && this._stateCacheHistorical===historical) {
       return this._stateCache;
     }
     this._stateCache = this.stateBuilder.buildState(this.flatMap || {}, {
@@ -1053,6 +1067,13 @@ Module.register("MMM-KiaAccess", {
       otpWarnDays: this.config.otpWarnDays
     });
     this._stateCacheKey = this.flatMap;
+    this._stateCacheHistorical=historical;
+    if(historical) {
+      // Retain numerical snapshots but do not render old lock/charging/panel
+      // states as current. The neutral last-reported summary carries them.
+      for(const key of ["locked","charging","plugged","v2l","v2x","chargeKw","chargeAmps","carOn","headlights","doorFL","doorFR","doorRL","doorRR","winFL","winFR","winRL","winRR","hood","trunk","sunroof","tyreAny","tyreFL","tyreFR","tyreRL","tyreRR"]) this._stateCache[key]=null;
+      this._stateCache.battery12vFresh=false;
+    }
     return this._stateCache;
   },
 
@@ -1106,16 +1127,22 @@ Module.register("MMM-KiaAccess", {
     if (this.config.debug) {
       const loc = (this.config.visuals && this.config.visuals.location) || {};
       Log.info("[MMM-KiaAccess] home check: " + JSON.stringify({
-        carLat: st.locationLat, carLon: st.locationLon,
-        homeLat: loc.homeLat, homeLon: loc.homeLon, radiusKm: loc.homeRadiusKm,
-        distKm: st.homeDistanceKm != null ? +st.homeDistanceKm.toFixed(3) : null,
-        atHome: st.atHome, plugged: st.plugged,
-        homeUnpluggedMin: st.homeUnpluggedMin == null
-          ? null : +st.homeUnpluggedMin.toFixed(1)
+        locationAvailable:st.locationLat!=null&&st.locationLon!=null,
+        homeConfigured:loc.homeLat!=null&&loc.homeLon!=null,
+        atHome:st.atHome
       }));
     }
 
     const res = this.conditions.evaluate(st, cfg, this.prevCond);
+    if(this.displayStatus().historical) {
+      // Unknown is not a confirmed clear. Suppress new physical-state alerts
+      // without issuing false "cleared" events for the old observations.
+      for(const condition of res.conditions) if(condition.reason!=="otp_expiring")condition.active=null;
+      res.meta.charging=null;
+      if(this._modalReason && this._alertShown && this._alertShown[this._modalReason]) {
+        this.sendNotification("HIDE_ALERT");this._alertShown[this._modalReason]=false;this._modalReason=null;
+      }
+    }
 
     if (this.config.debug) {
       const hp = res.conditions.find((c) => c.reason === "not_plugged_home");
@@ -1312,15 +1339,20 @@ Module.register("MMM-KiaAccess", {
     return bits.join(" · ");
   },
 
-  // while a charge session is open, re-render every 30s so the running cost
-  // keeps climbing between polls
+  // Presentation-only clock: update freshness even when no network poll occurs.
   liveChargeTimer() {
-    const want = !!this.openSession;
-    if (want && !this._liveTimer) {
-      this._liveTimer = setInterval(() => this.updateDom(0), 30000);
-    } else if (!want && this._liveTimer) {
-      clearInterval(this._liveTimer);
-      this._liveTimer = null;
+    const interval=this.openSession?30000:this.rawPayload?60000:0;
+    if(this._liveTimer && this._liveInterval!==interval){clearInterval(this._liveTimer);this._liveTimer=null;}
+    if(interval&&!this._liveTimer){
+      this._liveInterval=interval;
+      this._liveTimer=setInterval(()=>{
+        this._stateCache=null;this.syncDisplayStatus();
+        this._loadCondState(this.activeVin());this.processConditions();this._saveCondState(this.activeVin());
+        this.updateDom(0);
+      },interval);
+      // Node test timers should not keep a completed suite alive; browsers
+      // return numeric handles and do not implement unref().
+      if(this._liveTimer&&this._liveTimer.unref)this._liveTimer.unref();
     }
   },
 
@@ -1966,6 +1998,8 @@ Module.register("MMM-KiaAccess", {
       const at = this.reportedAt();
       if (at) h += " - as of: " + at;
     }
+    const status=this.displayStatus();
+    if(this.rawPayload&&status.label)h+=" · "+status.label;
     if (this.config.showTable !== false && this.config.showHeaderCount &&
         this.viewData && this.viewData.length) {
       h += ` (${this.viewData.length})`;
@@ -1987,7 +2021,9 @@ Module.register("MMM-KiaAccess", {
 
   getDom() {
     const wrapper = document.createElement("div");
-    wrapper.className = "kiaaccess";
+    const status=this.displayStatus();
+    wrapper.className = "kiaaccess kiaaccess-status-"+status.state;
+    wrapper.title=status.tooltip;
     if (this.config.maxWidth) wrapper.style.maxWidth = this.config.maxWidth;
     // scales the HTML readout text (the SVGs scale via their px width);
     // CSS reads --kia-scale in calc()
@@ -2003,18 +2039,19 @@ Module.register("MMM-KiaAccess", {
       l.className = "small dimmed";
       l.innerHTML = this.errorMessage
         ? "⚠ " + this.escape(this.errorMessage)
-        : "Loading Kia data …";
+        : this.waitingForData ? "Waiting for the next permitted Kia retrieval …" : "Loading Kia data …";
       l.classList.toggle("kiaaccess-error", !!this.errorMessage);
       wrapper.appendChild(l);
       return wrapper;
     }
 
-    // a warning strip while still showing the (possibly stale) data
-    if (this.errorMessage || this.staleNote) {
-      const strip = document.createElement("div");
-      strip.className = "kiaaccess-error xsmall";
-      strip.innerHTML =
-        "⚠ " + this.escape(this.errorMessage || this.staleNote) + " — showing cached data";
+    // Cached deferrals have no error banner. Timestamps live in the header
+    // and hover detail; actual failures get one restrained, fixed warning.
+    if(status.warning || status.historyText) {
+      const strip=document.createElement("div");
+      strip.className="kiaaccess-statusnote xsmall "+(status.warning?"is-error":"is-historical");
+      strip.textContent=[status.warning,status.historyText].filter(Boolean).join(" ");
+      strip.title=status.tooltip;
       wrapper.appendChild(strip);
     }
     const otp = this.otpNoticeText();
@@ -2146,6 +2183,7 @@ Module.register("MMM-KiaAccess", {
         const value = document.createElement("td");
         value.className = "kiaaccess-value bright";
         let valTxt = this.utils.formatValue(entry, this.config);
+        if(status.historical&&/vehicle\.(?:is_locked|ev_battery_is_charging|ev_battery_is_plugged_in)/.test(entry.key)) valTxt="Last reported: "+valTxt;
         if (entry.combinedSuffix) valTxt += " · " + entry.combinedSuffix;
         value.innerHTML = this.escape(valTxt);
 
@@ -2174,7 +2212,7 @@ Module.register("MMM-KiaAccess", {
     const foot = document.createElement("div");
     foot.className = "kiaaccess-footer xsmall dimmed";
     foot.innerHTML =
-      "updated " + this.agoText(this.lastUpdated) + (this.stale ? " · cached" : "");
+      "retrieved " + this.agoText(this.lastUpdated);
     wrapper.appendChild(foot);
   },
 

@@ -19,7 +19,7 @@ for(const name of ['bluebell.config.example.js','bluebell.server.config.example.
   assert.equal(c.visuals.car,true);assert.equal(c.visuals.battery,true);assert.equal(c.visuals.chargeProgress,false);
   assert.equal(c.visuals.location.enabled,false);assert.equal(c.visuals.location.map,false);
   assert.equal(c.notifications.checks.serviceDue,false);assert.equal(c.showTable,false);
-  assert.equal(c.showReportedInHeader,true);
+  assert.equal(c.showReportedInHeader,true);assert.equal(c.displayStaleAfter,3600000);assert.equal(c.displayStaleAfter,3600000);
   assert(c.include.includes('vehicle.car_battery_percentage'));
   assert(c.visuals.batteryDetail.includes('vehicle.car_battery_percentage'));
   if(name.includes('.server.')) {

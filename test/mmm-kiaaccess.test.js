@@ -308,11 +308,11 @@ function freshModule(overrides) {
   const idB = mod._fullIdentifier("VIN_B");
   mod.socketNotificationReceived("KIA_ERROR", { identifier: idB, error: "auth failed for B" });
   assert.strictEqual(mod.errorMessage, null, "a non-active vehicle's error must not surface on screen");
-  assert.strictEqual(mod.vehicleErrors.VIN_B, "auth failed for B");
+  assert.deepStrictEqual(mod.vehicleErrors.VIN_B, {state:"error",kind:"api"});
 
   const idA = mod._fullIdentifier("VIN_A");
   mod.socketNotificationReceived("KIA_ERROR", { identifier: idA, error: "auth failed for A" });
-  assert.strictEqual(mod.errorMessage, "auth failed for A", "the active vehicle's error must surface");
+  assert.strictEqual(mod.errorMessage, "Kia data unavailable; retrying with safety backoff.", "only a fixed safe warning may surface");
 
   clearTimeout(mod._timer);
   clearTimeout(mod._watchdog);
@@ -471,7 +471,8 @@ function freshModule(overrides) {
   });
   const sent = [];
   mod.sendNotification = (n, payload) => sent.push({ n, payload });
-  mod.flatMap = {}; // just needs to be truthy for processConditions() to proceed
+  mod.rawPayload = {vehicle:{last_updated_at:new Date().toISOString()}};
+  mod.flatMap = {}; // fresh fixture for alert ownership
   // A minimal conditions.evaluate() stub -- real threshold logic isn't the
   // point of this test, only that TWO DIFFERENT reasons (one per vehicle)
   // each independently go critical+active.
@@ -538,6 +539,7 @@ function freshModule(overrides) {
   mod.sendSocketNotification = (n, payload) => sent.push({ n, payload });
   mod.sendNotification = () => {};
   mod.flatMap = {};
+  mod.rawPayload = {vehicle:{last_updated_at:new Date().toISOString()}};
   mod.conditions = {
     evaluate: () => ({
       conditions: [{ reason: "battery_critical", level: "critical", active: true, oneShot: false, title: "t", message: "m" }],
@@ -692,8 +694,8 @@ function freshModule(overrides) {
   mod.activeVehicleIndex = 0;
   mod.showActiveVehicle();
   assert.strictEqual(mod.stale, true);
-  assert.strictEqual(mod.staleNote, "cap");
-  assert.strictEqual(mod.lastUpdated.toISOString(), "2025-12-31T00:00:00.000Z");
+  assert.strictEqual(mod.staleNote, null);
+  assert.strictEqual(mod.lastUpdated.toISOString(), "2026-01-01T00:00:00.000Z");
 }
 
 console.log("all mmm-kiaaccess tests passed");
