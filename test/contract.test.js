@@ -31,7 +31,9 @@ for (const file of files) {
   if (fx.state) {
     state = Object.assign({}, fx.state, { history: resolveHistory(fx.state.history) });
   } else {
-    state = buildState(fx.flat || {}, {});
+    const flat = Object.assign({}, fx.flat || {});
+    if (fx.reportedMinutesAgo != null) flat["vehicle.last_updated_at"] = new Date(Date.now()-fx.reportedMinutesAgo*60000).toISOString();
+    state = buildState(flat, {});
   }
 
   for (const [k, want] of Object.entries(fx.expectState || {})) {

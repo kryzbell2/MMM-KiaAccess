@@ -38,6 +38,7 @@ const webhook = require("./webhook.js");
 const exporter = require("./exporter.js");
 
 const AP = require("./adaptive_polling.js");
+const PG = require("./polling_guard.js");
 
 const CACHE_DIR = path.join(__dirname, "cache");
 
@@ -215,7 +216,7 @@ module.exports = NodeHelper.create({
   // request-rate budget instead of each getting their own -- see the
   // request/hour guard in handleFetch().
   acctKeyFor(config) {
-    return [config.region, config.brand, config.username].join("|");
+    return [String(config.region || "USA").toUpperCase(), String(config.brand || "KIA").toUpperCase(), String(config.username || "").trim().toLowerCase()].join("|");
   },
 
   // Pins a security-sensitive config value (pythonBin, the webhook
@@ -311,7 +312,7 @@ module.exports = NodeHelper.create({
   // fresh cache, as before.
   migrateLegacyCache(file) {
     const leftovers = fs.readdirSync(this.cacheDir)
-      .filter((f) => f.endsWith(".json") && path.join(this.cacheDir, f) !== file)
+      .filter((f) => f.endsWith(".json") && !/^(polling-|request-budget-)/.test(f) && path.join(this.cacheDir, f) !== file)
       .filter((f) => {
         try {
           const parsed = JSON.parse(fs.readFileSync(path.join(this.cacheDir, f), "utf8"));
@@ -431,6 +432,7 @@ module.exports = NodeHelper.create({
         const current = this.adaptive[id];
         policy = current && !current.vehicleKey ? current : new AP.Poller(Date.now(), account);
         policy.vehicleKey = vehicleKey;
+        PG.restore(policy, vehicleKey);
         account.vehicles.set(vehicleKey, policy);
       }
       this.adaptive[id] = policy;
@@ -535,44 +537,37 @@ module.exports = NodeHelper.create({
     }
 
     const apConfig = AP.options(config.adaptivePolling);
-    const adaptive = config.adaptivePolling && apConfig.enabled !== false;
+    const adaptive = apConfig.enabled === true;
     let policy, decision;
     if (adaptive) {
       policy = this.adaptivePolicy(id, config);
-      if (policy.account.busy) return;
+
       const due = Math.max(policy.due, policy.account.backoffUntil);
       if (Date.now() < due) return this._reportServe(id, config, rotating, {
         retryAfterMs: due - Date.now(), note: "adaptive polling wait"
       });
     }
 
-    // ---- request/hour guard (Kia source only) ----
-    // Keyed by ACCOUNT (region|brand|username), not `id` -- `id` includes the
-    // vin-or-"auto" suffix, so two module configs covering the same real Kia
-    // account under different vin-scopes (e.g. one single-vehicle block plus
-    // one rotate block for the same login) used to each get their OWN
-    // request budget, silently doubling (or more) the real request rate
-    // against Kia's servers despite maxRequestsPerHour being set identically
-    // on both -- defeating the one thing this cap exists to guarantee.
+    // All Kia modes share the same persisted guard, including legacy cached
+    // reads and explicit legacy live requests. No browser retry can bypass it.
     const acctKey = this.acctKeyFor(config);
-    const acct = this.acctState[acctKey] || (this.acctState[acctKey] = { reqTimes: [] });
-    const now = Date.now();
-    acct.reqTimes = acct.reqTimes.filter((t) => now - t < 3600e3);
-    const cap = Number(config.maxRequestsPerHour) || 0;
-    if (cap > 0 && acct.reqTimes.length >= cap) {
-      const retryAfterMs = 3600e3 - (now - acct.reqTimes[0]) + 1000;
-      Log.warn(`[MMM-KiaAccess] request cap reached (${cap}/hr) — serving cache`);
-      return this._reportServe(id, config, rotating, {
-        stale: true,
-        note: `paused — ${cap} requests/hour cap`,
-        retryAfterMs
-      });
+    const acct = this.adaptiveAccounts[acctKey] || (this.adaptiveAccounts[acctKey] = AP.accountBudget());
+    this.acctState[acctKey] = acct;
+    const lease = PG.acquire(this.cacheDir, acctKey, acct, config);
+    if (!lease.allowed) {
+      Log.info("[MMM-KiaAccess] " + lease.reason);
+      return this._reportServe(id, config, rotating, {retryAfterMs:lease.delay,note:lease.reason});
     }
+    let legacyLive = config.refresh === true;
     if (policy) {
-      decision = policy.reserve(apConfig, now, rotating);
+      decision = policy.reserve(apConfig, Date.now(), rotating);
       Log.info("[MMM-KiaAccess] " + decision.reason + (decision.live ? " requested; preflight pending" : ""));
+    } else if (legacyLive) {
+      if (Date.now()<acct.bootUntil || acct.times.length>=6) legacyLive=false;
+      else acct.times.push(Date.now());
     }
-    acct.reqTimes.push(now);
+    try { lease.save(); } catch (_) { lease.release(); return this._reportFailure(id,config,rotating,"account guard storage unavailable"); }
+    acct.busy=true;
     this.inFlight[id] = true;
 
     // pythonBin is pinned to this account's first-seen value -- see start()'s
@@ -599,7 +594,8 @@ module.exports = NodeHelper.create({
       region: config.region || "USA",
       vin: rotating ? "" : config.vin || "",
       allVehicles: rotating,
-      refresh: adaptive ? decision.live : config.refresh !== false,
+      refresh: adaptive ? decision.live : legacyLive,
+      requestProtection: { maxCloudRequestsPerHour: lease.limits.cloud },
       adaptivePolling: adaptive ? apConfig : null,
       wakeVin: adaptive ? config.vin || "" : "",
       geocode: config.geocode === true,
@@ -621,7 +617,8 @@ module.exports = NodeHelper.create({
       child = spawn(pythonBin, [script], { stdio: ["pipe", "pipe", "pipe"] });
     } catch (err) {
       this.inFlight[id] = false;
-      if (policy) { policy.account.busy = false; policy.fail(apConfig, Date.now()); }
+      acct.busy=false; acct.failures++; acct.backoffUntil=Date.now()+300000 * 2**Math.min(acct.failures-1,3);
+      try { lease.save(); } catch (_) { Log.error("[MMM-KiaAccess] guard state write failed; passive mode required"); } finally { lease.release(); }
       return this._reportFailure(id, config, rotating, `could not start ${pythonBin}: ${err.message}`);
     }
 
@@ -637,8 +634,11 @@ module.exports = NodeHelper.create({
     const reportOnce = (message) => {
       if (settled) return;
       settled = true;
-      if (policy) { policy.account.busy = false; policy.fail(apConfig, Date.now()); }
-      this._reportFailure(id, config, rotating, adaptive ? "adaptive API error; passive backoff" : message);
+      if (policy) policy.fail(apConfig, Date.now());
+      acct.busy=false; acct.failures++;
+      acct.backoffUntil=Math.max(acct.backoffUntil,Date.now()+300000*2**Math.min(acct.failures-1,3));
+      try { lease.save(); } catch (_) { Log.error("[MMM-KiaAccess] guard state write failed; passive mode required"); } finally { lease.release(); }
+      this._reportFailure(id, config, rotating, "Kia API error; passive backoff");
     };
 
     child.on("error", (err) => {
@@ -653,8 +653,12 @@ module.exports = NodeHelper.create({
       clearTimeout(killTimer);
       this.inFlight[id] = false;
       if (settled) return; // "error" already reported this exact failure
-      if (policy) policy.account.busy = false;
-      this._handleBridgeClose(id, config, rotating, code, stdout, stderr, reportOnce);
+      acct.busy=false;
+      try {
+        this._handleBridgeClose(id, config, rotating, code, stdout, stderr, reportOnce);
+        if (!settled) { acct.failures=0; lease.save(); }
+      } catch (_) { reportOnce("invalid bridge response"); }
+      finally { lease.release(); }
     });
 
     // a broken pipe (child died before reading stdin) must not crash the helper
@@ -680,7 +684,7 @@ module.exports = NodeHelper.create({
     } catch (e) {
       return reportOnce(`bridge produced no JSON (exit ${code}). ${truncate(stderr || stdout)}`);
     }
-    if (config.adaptivePolling && AP.options(config.adaptivePolling).enabled !== false &&
+    if (AP.options(config.adaptivePolling).enabled === true &&
         result.ok && typeof (result.meta && result.meta.adaptiveLive) !== "boolean") {
       return reportOnce("adaptive bridge returned no verifiable refresh metadata");
     }
@@ -757,11 +761,7 @@ module.exports = NodeHelper.create({
       // logging what the account actually returned turns this from a
       // silent no-op into something fixable.
       if (result.vehicles.length && !seenVins.size) {
-        Log.warn("[MMM-KiaAccess] rotate mode: account returned " +
-          result.vehicles.length + " vehicle(s) but none matched config.vehicles' vin: " +
-          "values -- account has: " +
-          result.vehicles.map((v) => vehicleIdentity(v) || "(no VIN or id)").join(", ") +
-          ". For a Kia USA account, set vin: to the vehicle's own id shown here, not its literal VIN.");
+        Log.warn("[MMM-KiaAccess] rotate mode: no configured vehicle matched; check account vehicle selection privately");
       }
 
       // Retire any vehicle that WAS configured on a previous fetch but no
@@ -819,7 +819,7 @@ module.exports = NodeHelper.create({
     const vehicle = payload.vehicle || {};
     payload._meta = Object.assign({ fetchedAt: new Date().toISOString(), failStreak: 0 }, payload._meta || {});
     const apConfig = AP.options(config.adaptivePolling);
-    const adaptive = config.adaptivePolling && apConfig.enabled !== false && config.source !== "homeassistant";
+    const adaptive = apConfig.enabled === true && config.source !== "homeassistant";
     if (payload._meta.warning) Log.warn("[MMM-KiaAccess] " +
       (adaptive ? "unverifiable telemetry; passive latch" : payload._meta.warning));
     if (adaptive) {
@@ -842,7 +842,7 @@ module.exports = NodeHelper.create({
 
     // ---- record history (append at most every minGap; between gaps keep the
     // latest slot current, but only when a value actually changed) ----
-    const minGap = (Number(config.historyMinIntervalMinutes) || 30) * 60e3;
+    const minGap = (adaptive && policyModeCharging(payload) ? 10 : (Number(config.historyMinIntervalMinutes) || 30)) * 60e3;
     const last = s.history[s.history.length - 1];
     const sample = {
       t: Date.now(),
@@ -853,14 +853,17 @@ module.exports = NodeHelper.create({
       charging: vehicle.ev_battery_is_charging,
       pollingMode: payload._meta.pollingMode
     };
-    const previousReport = s.lastGood && s.lastGood.vehicle && s.lastGood.vehicle.last_updated_at;
-    const newReport = Number.isFinite(AP.timestamp(vehicle)) && sample.reportedAt !== previousReport &&
-      (!last || sample.reportedAt !== last.reportedAt);
+    const reported = AP.timestamp(vehicle);
+    const previousTime = AP.timestamp(s.lastGood && s.lastGood.vehicle);
+    const historyTime = last && last.reportedAt ? Date.parse(last.reportedAt) : NaN;
+    const newReport = Number.isFinite(reported) && reported <= Date.now() &&
+      (!Number.isFinite(previousTime) || reported > previousTime) &&
+      (!Number.isFinite(historyTime) || reported > historyTime);
     let histChanged = false;
-    if ((!adaptive || newReport) && (!last || sample.t - last.t >= minGap)) {
+    if (newReport && (!last || sample.t - last.t >= minGap)) {
       s.history.push(sample);
       histChanged = true;
-    } else if (last && (!adaptive || newReport) && (last.ev !== sample.ev || last.v12 !== sample.v12 || (adaptive && last.charging !== sample.charging))) {
+    } else if (last && newReport && (last.ev !== sample.ev || last.v12 !== sample.v12 || (adaptive && last.charging !== sample.charging))) {
       s.history[s.history.length - 1] = sample;
       histChanged = true;
     }
@@ -1626,3 +1629,5 @@ function truncate(s, n) {
   n = n || 300;
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
+
+function policyModeCharging(payload) { return payload._meta.pollingMode === "charging"; }

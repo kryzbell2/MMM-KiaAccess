@@ -173,8 +173,8 @@ def evaluate(s, cfg, prev):
     if has_battery:
         threshold("ev_battery_low", _num(s.get("batteryPct")), _check_cfg(cfg, "evBatteryLow"), "EV battery")
         threshold("ev_battery_critical", _num(s.get("batteryPct")), _check_cfg(cfg, "evBatteryCritical"), "EV battery critically")
-    threshold("battery_12v_low", _num(s.get("car12vPct")), _check_cfg(cfg, "battery12vLow"), "12V battery")
-    threshold("battery_12v_critical", _num(s.get("car12vPct")), _check_cfg(cfg, "battery12vCritical"), "12V battery critically")
+    threshold("battery_12v_low", (None if s.get("battery12vFresh") is False else _num(s.get("car12vPct"))), _check_cfg(cfg, "battery12vLow"), "12V battery")
+    threshold("battery_12v_critical", (None if s.get("battery12vFresh") is False else _num(s.get("car12vPct"))), _check_cfg(cfg, "battery12vCritical"), "12V battery critically")
 
     # ---- vehicle fault lamps (brake fluid, 12V system, ABS, airbag, ...) ----
     c_fault = _check_cfg(cfg, "vehicleFault")
@@ -186,14 +186,24 @@ def evaluate(s, cfg, prev):
              {"faults": faults or []})
 
     # ---- 12V draining while parked ----
+    def measurement_time(h):
+        if h.get("reportedAt"):
+            try:
+                import datetime
+                d=datetime.datetime.fromisoformat(h["reportedAt"].replace("Z", "+00:00"))
+                return d.timestamp()*1000 if d.tzinfo is not None else float("nan")
+            except (ValueError,TypeError):
+                return float("nan")
+        return h.get("t",float("nan")) if s.get("battery12vFresh") is None else float("nan")
+
     c_vd = _check_cfg(cfg, "battery12vDrain")
     if c_vd.get("enabled"):
-        parked = s.get("carOn") is not True and s.get("charging") is not True and s.get("plugged") is not True
+        parked = s.get("battery12vFresh") is not False and s.get("carOn") is not True and s.get("charging") is not True and s.get("plugged") is not True
         over_ms = (_num(c_vd.get("overHours")) or 12) * 3600e3
         drop = _num(c_vd.get("dropPct")) or 8
         recent = sorted(
             [h for h in (s.get("history") or [])
-             if h and _num(h.get("v12")) is not None and _now_ms() - h["t"] <= over_ms],
+             if h and _num(h.get("v12")) is not None and 0 <= _now_ms() - measurement_time(h) <= over_ms],
             key=lambda h: h["t"],
         )
         delta = (_num(recent[0]["v12"]) - _num(recent[-1]["v12"])) if len(recent) >= 2 else None

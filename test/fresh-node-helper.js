@@ -13,7 +13,7 @@ function freshHelper(cacheDir) {
   const helper = loadNodeHelper();
   helper.sendSocketNotification = () => {}; // overridden per-test where the calls matter
   helper.start();
-  if (cacheDir) helper.cacheDir = cacheDir;
+  helper.cacheDir = cacheDir || tmpCacheDir();
   return helper;
 }
 

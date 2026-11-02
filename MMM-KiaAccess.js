@@ -48,14 +48,15 @@ Module.register("MMM-KiaAccess", {
                              // before falling back to Kia's cached copy for this poll
 
     // ---- polling / reliability ----
-    adaptivePolling: { enabled: true, chargingInterval: 600000, pluggedInterval: 1800000,
+    adaptivePolling: { enabled: false, chargingInterval: 600000, pluggedInterval: 1800000,
       idleInterval: 3600000, staleInterval: 3600000, statusMaxAge: 1200000,
       liveRefreshTimeout: 30, maxLiveRequestsPerHour: 6, maxContinuousActiveMinutes: 90 },
     updateInterval: 30 * 60 * 1000, // 30 min. Be gentle: frequent polls drain the 12V battery.
     retryInterval: 5 * 60 * 1000, // base delay between retries after a failure
     backoffMax: 8, // cap the exponential backoff at retryInterval * this
-    maxRequestsPerHour: 0, // 0 = no cap. Protects the Kia account from lock-outs.
-    refresh: true, // true = ask the car for live data, false = Kia's cached copy
+    maxRequestsPerHour: 12, // account-wide cloud polling cycles/hour (1..24)
+    maxCloudRequestsPerHour: 60, // actual HTTP sends/hour (1..120)
+    refresh: false, // cached by default; explicit true opts into legacy live refresh
     geocode: false, // true = resolve vehicle.geocode to a street address (OpenStreetMap)
     historyDays: 60, // rolling SoC / 12V history kept on disk (sparkline + drain alert)
     historyMinIntervalMinutes: 30, // don't record history samples closer than this
@@ -732,6 +733,7 @@ Module.register("MMM-KiaAccess", {
       fetchTimeout: c.fetchTimeout,
       forceRefreshTimeout: c.forceRefreshTimeout,
       maxRequestsPerHour: c.maxRequestsPerHour,
+      maxCloudRequestsPerHour: c.maxCloudRequestsPerHour,
       historyDays: c.historyDays,
       historyMinIntervalMinutes: c.historyMinIntervalMinutes,
       chargeLog: {
@@ -879,8 +881,11 @@ Module.register("MMM-KiaAccess", {
   },
 
   nextDelay(failStreak, retryAfterMs) {
-    if (retryAfterMs) return retryAfterMs;
-    if (!failStreak) return this.config.updateInterval;
+    if (retryAfterMs) return Math.max(300000, retryAfterMs);
+    if (!failStreak) {
+      if (String(this.config.source || "kia").toLowerCase() === "homeassistant") return this.config.updateInterval;
+      return Math.max(300000, Number.isFinite(this.config.updateInterval) ? this.config.updateInterval : 1800000);
+    }
     const cap = this.config.retryInterval * (this.config.backoffMax || 8);
     return Math.min(this.config.retryInterval * Math.pow(2, failStreak - 1), cap);
   },

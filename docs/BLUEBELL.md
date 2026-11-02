@@ -6,7 +6,7 @@ traction battery, range in miles, charging/plug state, and 12V percentage;
 320px layout, 190px car, no map, and no service-due alert.
 The 12V value is reported charge percentage, not a battery health test.
 
-The example requests cached data every 30 minutes (`1800000` milliseconds),
+The example explicitly disables adaptive polling and requests cached data every 30 minutes (`1800000` milliseconds),
 with both forced-refresh controls disabled. This is not a promise that Kia
 will never wake the vehicle. The vehicle-reported timestamp can remain stale
 across polls. Two independently enrolled mirrors each poll every 30 minutes,

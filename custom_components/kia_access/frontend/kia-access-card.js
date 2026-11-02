@@ -364,6 +364,11 @@ g.KiaAccessCommands={
       tyreRR: bool("tire_pressure_rear_right_warning_is_on"),
       // extra fields used by conditions.js (not drawn)
       car12vPct: num("car_battery_percentage"),
+      battery12vFresh: (function () {
+        var raw=f["vehicle.last_updated_at"];
+        var t=typeof raw === "string" && /(?:Z|[+-]\d\d:\d\d)$/.test(raw) ? Date.parse(raw) : NaN;
+        return isFinite(t) && Date.now()>=t && Date.now()-t<=1200000 && f["_meta.stale"]!==true;
+      })(),
       chargeLimitPct: chargeLimitPct,
       capacityKwh: num("ev_battery_capacity"),
       serviceKm: num("next_service_distance"), // distance to the next service
@@ -1698,8 +1703,8 @@ g.KiaAccessCommands={
       threshold("ev_battery_low", num(s.batteryPct), checkCfg(cfg, "evBatteryLow"), "EV battery");
       threshold("ev_battery_critical", num(s.batteryPct), checkCfg(cfg, "evBatteryCritical"), "EV battery critically");
     }
-    threshold("battery_12v_low", num(s.car12vPct), checkCfg(cfg, "battery12vLow"), "12V battery");
-    threshold("battery_12v_critical", num(s.car12vPct), checkCfg(cfg, "battery12vCritical"), "12V battery critically");
+    threshold("battery_12v_low", s.battery12vFresh === false ? null : num(s.car12vPct), checkCfg(cfg, "battery12vLow"), "12V battery");
+    threshold("battery_12v_critical", s.battery12vFresh === false ? null : num(s.car12vPct), checkCfg(cfg, "battery12vCritical"), "12V battery critically");
 
     // ---- vehicle fault lamps (brake fluid, 12V system, ABS, airbag, …) ----
     var cFault = checkCfg(cfg, "vehicleFault");
@@ -1716,12 +1721,13 @@ g.KiaAccessCommands={
     // ---- 12V draining while parked ----
     var cVD = checkCfg(cfg, "battery12vDrain");
     if (cVD.enabled) {
-      var parked = s.carOn !== true && s.charging !== true && s.plugged !== true;
+      var parked = s.battery12vFresh !== false && s.carOn !== true && s.charging !== true && s.plugged !== true;
       var overMs = (num(cVD.overHours) || 12) * 3600e3;
       var drop = num(cVD.dropPct) || 8;
       var recent = (s.history || [])
         .filter(function (h) {
-          return h && num(h.v12) != null && Date.now() - h.t <= overMs;
+          var t=h && (h.reportedAt ? Date.parse(h.reportedAt) : s.battery12vFresh == null ? h.t : NaN);
+          return h && num(h.v12) != null && isFinite(t) && Date.now()>=t && Date.now()-t<=overMs;
         })
         .sort(function (a, b) { return a.t - b.t; });
       var delta = recent.length >= 2 ? num(recent[0].v12) - num(recent[recent.length - 1].v12) : null;

@@ -39,7 +39,11 @@ for path in files:
         state = dict(fx["state"])
         state["history"] = resolve_history(state.get("history"))
     else:
-        state = build_state(fx.get("flat") or {}, {})
+        flat = dict(fx.get("flat") or {})
+        if fx.get("reportedMinutesAgo") is not None:
+            import datetime
+            flat["vehicle.last_updated_at"] = datetime.datetime.fromtimestamp(time.time()-fx["reportedMinutesAgo"]*60,datetime.timezone.utc).isoformat()
+        state = build_state(flat, {})
 
     for k, want in (fx.get("expectState") or {}).items():
         got = state.get(k)

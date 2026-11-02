@@ -26,5 +26,6 @@
     "door_open": false,
     "tyre_pressure": false,
     "otp_expiring": null
-  }
+  },
+  "reportedMinutesAgo": 5
 }
